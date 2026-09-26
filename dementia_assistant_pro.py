@@ -29,7 +29,7 @@ DB_FILE = "family_deepface_data.pkl"
 
 MODEL_NAME = "ArcFace"
 
-DETECTOR_BACKEND = "yolov12s"  # retinaface / mtcnn / opencv also work
+DETECTOR_BACKEND = "yolov12s"
 
 DISTANCE_METRIC = "cosine"
 
@@ -45,8 +45,28 @@ REQUIRED_CONFIRMATIONS = 3
 
 MAX_EMBEDDINGS_PER_PERSON = 8
 
-# How long an old face track is kept (in seconds)
 TRACK_TIMEOUT = 1.5
+
+
+# ============================================================
+# APP COLORS / UI
+# ============================================================
+
+BG = "#F5F5F7"
+WHITE = "#FFFFFF"
+CARD = "#FFFFFF"
+TEXT = "#1D1D1F"
+SECONDARY = "#6E6E73"
+BORDER = "#E5E5EA"
+
+ACCENT = "#007AFF"
+ACCENT_DARK = "#0066D6"
+
+SUCCESS = "#34C759"
+WARNING = "#FF9F0A"
+DANGER = "#FF3B30"
+
+VIDEO_BG = "#000000"
 
 
 # ============================================================
@@ -60,6 +80,8 @@ class DementiaAssistantPro:
         self.root = root
         self.root.title("ForgetMeNot")
         self.root.geometry("1550x820")
+        self.root.minsize(1200, 700)
+        self.root.configure(bg=BG)
 
         # ----------------------------------------------------
         # Database
@@ -77,7 +99,10 @@ class DementiaAssistantPro:
             self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
         if not self.cap.isOpened():
-            messagebox.showerror("Camera Error", "Could not open camera.")
+            messagebox.showerror(
+                "Camera Error",
+                "Could not open camera."
+            )
             return
 
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1080)
@@ -96,15 +121,9 @@ class DementiaAssistantPro:
             lambda: deque(maxlen=REQUIRED_CONFIRMATIONS)
         )
 
-        # Lightweight centroid-based face tracker: gives each face a
-        # stable track_id across frames so the UI card can smoothly
-        # follow one specific head instead of jumping between detections.
-        # track_id -> {"pos": (cx, cy), "last_seen": timestamp}
         self.tracked_faces = {}
         self.next_track_id = 0
 
-        # Smooth (EMA) on-screen position of each identity card, keyed
-        # by track_id. Higher ui_smoothing = snappier, lower = smoother.
         self.ui_positions = {}
         self.ui_smoothing = 0.25
 
@@ -130,9 +149,12 @@ class DementiaAssistantPro:
         # Warm up AI model
         # ----------------------------------------------------
 
-        self.status_label.config(text="Loading AI model...")
+        self.status_label.config(text="Preparing recognition system...")
 
-        threading.Thread(target=self.warmup_model, daemon=True).start()
+        threading.Thread(
+            target=self.warmup_model,
+            daemon=True
+        ).start()
 
         # ----------------------------------------------------
         # Start camera loop
@@ -144,7 +166,10 @@ class DementiaAssistantPro:
         # Closing
         # ----------------------------------------------------
 
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.protocol(
+            "WM_DELETE_WINDOW",
+            self.on_closing
+        )
 
     # ========================================================
     # DATABASE
@@ -179,146 +204,706 @@ class DementiaAssistantPro:
             print("Database saving error:", e)
 
     # ========================================================
+    # UI HELPERS
+    # ========================================================
+
+    def create_button(
+        self,
+        parent,
+        text,
+        command,
+        primary=False,
+        width=None
+    ):
+
+        if primary:
+            bg = ACCENT
+            active_bg = ACCENT_DARK
+            fg = WHITE
+        else:
+            bg = "#F2F2F7"
+            active_bg = "#E5E5EA"
+            fg = TEXT
+
+        button = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            font=("Arial", 10, "bold"),
+            fg=fg,
+            bg=bg,
+            activeforeground=fg,
+            activebackground=active_bg,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+            padx=16,
+            pady=10
+        )
+
+        if width:
+            button.config(width=width)
+
+        return button
+
+    def create_entry(self, parent, placeholder=""):
+
+        frame = tk.Frame(
+            parent,
+            bg="#F2F2F7",
+            highlightthickness=1,
+            highlightbackground="#E5E5EA",
+            highlightcolor=ACCENT
+        )
+
+        entry = tk.Entry(
+            frame,
+            font=("Arial", 10),
+            bg="#F2F2F7",
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            bd=0
+        )
+
+        entry.pack(
+            fill="both",
+            expand=True,
+            padx=10,
+            pady=8
+        )
+
+        return frame, entry
+
+    def create_section_title(self, parent, title, subtitle=None):
+
+        container = tk.Frame(
+            parent,
+            bg=WHITE
+        )
+
+        tk.Label(
+            container,
+            text=title,
+            font=("Arial", 17, "bold"),
+            fg=TEXT,
+            bg=WHITE
+        ).pack(
+            anchor="w"
+        )
+
+        if subtitle:
+            tk.Label(
+                container,
+                text=subtitle,
+                font=("Arial", 9),
+                fg=SECONDARY,
+                bg=WHITE
+            ).pack(
+                anchor="w",
+                pady=(3, 0)
+            )
+
+        return container
+
+    # ========================================================
     # UI
     # ========================================================
 
     def create_ui(self):
 
         # ----------------------------------------------------
-        # Two-column layout: video/controls on the left,
-        # conversation panel on the right.
+        # Root layout
         # ----------------------------------------------------
 
-        main_frame = tk.Frame(self.root)
-        main_frame.pack(fill="both", expand=True)
+        main_frame = tk.Frame(
+            self.root,
+            bg=BG
+        )
 
-        left_frame = tk.Frame(main_frame)
-        left_frame.pack(side="left", fill="both", expand=True)
+        main_frame.pack(
+            fill="both",
+            expand=True
+        )
 
-        right_frame = tk.Frame(main_frame, width=360, bg="#f2f2f2")
-        right_frame.pack(side="right", fill="y")
+        # ====================================================
+        # LEFT SIDE
+        # ====================================================
+
+        left_frame = tk.Frame(
+            main_frame,
+            bg=BG
+        )
+
+        left_frame.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(24, 12),
+            pady=20
+        )
+
+        # ----------------------------------------------------
+        # Top navigation/header
+        # ----------------------------------------------------
+
+        header = tk.Frame(
+            left_frame,
+            bg=BG
+        )
+
+        header.pack(
+            fill="x",
+            pady=(0, 15)
+        )
+
+        title_container = tk.Frame(
+            header,
+            bg=BG
+        )
+
+        title_container.pack(
+            side="left"
+        )
+
+        tk.Label(
+            title_container,
+            text="ForgetMeNot",
+            font=("Arial", 24, "bold"),
+            fg=TEXT,
+            bg=BG
+        ).pack(
+            anchor="w"
+        )
+
+        tk.Label(
+            title_container,
+            text="A simple companion for remembering the people around you",
+            font=("Arial", 9),
+            fg=SECONDARY,
+            bg=BG
+        ).pack(
+            anchor="w",
+            pady=(2, 0)
+        )
+
+        # ----------------------------------------------------
+        # AI status pill
+        # ----------------------------------------------------
+
+        status_container = tk.Frame(
+            header,
+            bg=WHITE,
+            highlightthickness=1,
+            highlightbackground=BORDER
+        )
+
+        status_container.pack(
+            side="right",
+            padx=(10, 0),
+            pady=3
+        )
+
+        self.status_dot = tk.Label(
+            status_container,
+            text="●",
+            font=("Arial", 9),
+            fg=SUCCESS,
+            bg=WHITE
+        )
+
+        self.status_dot.pack(
+            side="left",
+            padx=(10, 4)
+        )
+
+        self.status_label = tk.Label(
+            status_container,
+            text="Starting...",
+            font=("Arial", 9, "bold"),
+            fg=TEXT,
+            bg=WHITE
+        )
+
+        self.status_label.pack(
+            side="left",
+            padx=(0, 10),
+            pady=7
+        )
+
+        # ----------------------------------------------------
+        # Camera card
+        # ----------------------------------------------------
+
+        camera_outer = tk.Frame(
+            left_frame,
+            bg=WHITE,
+            highlightthickness=1,
+            highlightbackground=BORDER
+        )
+
+        camera_outer.pack(
+            fill="both",
+            expand=True
+        )
+
+        self.video_label = tk.Label(
+            camera_outer,
+            bg=VIDEO_BG,
+            bd=0,
+            highlightthickness=0
+        )
+
+        self.video_label.pack(
+            fill="both",
+            expand=True,
+            padx=1,
+            pady=1
+        )
+
+        # ----------------------------------------------------
+        # Registration panel
+        # ----------------------------------------------------
+
+        registration_card = tk.Frame(
+            left_frame,
+            bg=WHITE,
+            highlightthickness=1,
+            highlightbackground=BORDER
+        )
+
+        registration_card.pack(
+            fill="x",
+            pady=(15, 0)
+        )
+
+        registration_inner = tk.Frame(
+            registration_card,
+            bg=WHITE
+        )
+
+        registration_inner.pack(
+            fill="x",
+            padx=18,
+            pady=15
+        )
+
+        # Section heading
+
+        reg_title = tk.Label(
+            registration_inner,
+            text="Register someone",
+            font=("Arial", 13, "bold"),
+            fg=TEXT,
+            bg=WHITE
+        )
+
+        reg_title.grid(
+            row=0,
+            column=0,
+            columnspan=5,
+            sticky="w",
+            pady=(0, 10)
+        )
+
+        # Name
+
+        tk.Label(
+            registration_inner,
+            text="Name",
+            font=("Arial", 9, "bold"),
+            fg=SECONDARY,
+            bg=WHITE
+        ).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            padx=(0, 7)
+        )
+
+        name_frame, self.name_entry = self.create_entry(
+            registration_inner
+        )
+
+        name_frame.grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            padx=(0, 10)
+        )
+
+        # Relationship
+
+        tk.Label(
+            registration_inner,
+            text="Relationship",
+            font=("Arial", 9, "bold"),
+            fg=SECONDARY,
+            bg=WHITE
+        ).grid(
+            row=1,
+            column=1,
+            sticky="w",
+            padx=(0, 7)
+        )
+
+        relationship_frame, self.relationship_entry = self.create_entry(
+            registration_inner
+        )
+
+        relationship_frame.grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            padx=(0, 10)
+        )
+
+        # Buttons
+
+        self.register_btn = self.create_button(
+            registration_inner,
+            "Register Person",
+            self.register_person,
+            primary=True
+        )
+
+        self.register_btn.grid(
+            row=2,
+            column=2,
+            padx=(5, 5)
+        )
+
+        self.register_voice_btn = self.create_button(
+            registration_inner,
+            "Voice Register",
+            self.voice_register_person,
+            primary=False
+        )
+
+        self.register_voice_btn.grid(
+            row=2,
+            column=3,
+            padx=(5, 0)
+        )
+
+        registration_inner.grid_columnconfigure(
+            0,
+            weight=1
+        )
+
+        registration_inner.grid_columnconfigure(
+            1,
+            weight=1
+        )
+
+        # ====================================================
+        # RIGHT SIDE
+        # ====================================================
+
+        right_frame = tk.Frame(
+            main_frame,
+            bg=WHITE,
+            width=380,
+            highlightthickness=1,
+            highlightbackground=BORDER
+        )
+
+        right_frame.pack(
+            side="right",
+            fill="y",
+            padx=(12, 24),
+            pady=20
+        )
+
         right_frame.pack_propagate(False)
 
         # ----------------------------------------------------
-        # Video
+        # Conversation header
         # ----------------------------------------------------
 
-        self.video_label = tk.Label(left_frame, bg="black")
-        self.video_label.pack(fill="both", expand=True, padx=10, pady=10)
-
-        # ----------------------------------------------------
-        # Bottom registration panel
-        # ----------------------------------------------------
-
-        panel = tk.Frame(left_frame)
-        panel.pack(fill="x", padx=10, pady=10)
-
-        tk.Label(panel, text="Name:").grid(row=0, column=0, padx=5)
-
-        self.name_entry = tk.Entry(panel, width=18)
-        self.name_entry.grid(row=0, column=1, padx=5)
-
-        tk.Label(panel, text="Relationship:").grid(row=0, column=2, padx=5)
-
-        self.relationship_entry = tk.Entry(panel, width=18)
-        self.relationship_entry.grid(row=0, column=3, padx=5)
-
-        self.register_btn = tk.Button(
-            panel,
-            text="📷 Register Person",
-            font=("Arial", 11, "bold"),
-            command=self.register_person
+        conversation_header = tk.Frame(
+            right_frame,
+            bg=WHITE
         )
-        self.register_btn.grid(row=0, column=4, padx=10)
 
-        self.register_voice_btn = tk.Button(
-            panel,
-            text="🎤 Voice Register",
-            font=("Arial", 11, "bold"),
-            command=self.voice_register_person
+        conversation_header.pack(
+            fill="x",
+            padx=22,
+            pady=(22, 0)
         )
-        self.register_voice_btn.grid(row=0, column=5, padx=10)
-
-        # ----------------------------------------------------
-        # Status
-        # ----------------------------------------------------
-
-        self.status_label = tk.Label(
-            left_frame, text="Starting...", font=("Arial", 12, "bold")
-        )
-        self.status_label.pack(pady=5)
-
-        # ----------------------------------------------------
-        # Right panel: conversation recording + retrieval
-        # ----------------------------------------------------
 
         tk.Label(
-            right_frame,
-            text="Conversation",
-            font=("Arial", 13, "bold"),
-            bg="#f2f2f2"
-        ).pack(pady=(15, 5))
-
-        self.record_btn = tk.Button(
-            right_frame,
-            text="🎙️ Start Conversation",
-            font=("Arial", 11, "bold"),
-            command=self.toggle_conversation_recording
+            conversation_header,
+            text="Conversations",
+            font=("Arial", 21, "bold"),
+            fg=TEXT,
+            bg=WHITE
+        ).pack(
+            anchor="w"
         )
-        self.record_btn.pack(pady=5, padx=15, fill="x")
 
-        # "Last conversation with X" retrieval area
-        retrieval_frame = tk.Frame(right_frame, bg="#f2f2f2")
-        retrieval_frame.pack(pady=(15, 5), padx=15, fill="x")
+        tk.Label(
+            conversation_header,
+            text="Record and remember important conversations.",
+            font=("Arial", 9),
+            fg=SECONDARY,
+            bg=WHITE
+        ).pack(
+            anchor="w",
+            pady=(3, 0)
+        )
+
+        # ----------------------------------------------------
+        # Recording button
+        # ----------------------------------------------------
+
+        recording_card = tk.Frame(
+            right_frame,
+            bg="#F2F2F7"
+        )
+
+        recording_card.pack(
+            fill="x",
+            padx=22,
+            pady=(20, 12)
+        )
+
+        recording_inner = tk.Frame(
+            recording_card,
+            bg="#F2F2F7"
+        )
+
+        recording_inner.pack(
+            fill="x",
+            padx=12,
+            pady=12
+        )
+
+        tk.Label(
+            recording_inner,
+            text="Conversation",
+            font=("Arial", 10, "bold"),
+            fg=TEXT,
+            bg="#F2F2F7"
+        ).pack(
+            anchor="w"
+        )
+
+        tk.Label(
+            recording_inner,
+            text="Record a conversation with the person currently recognized.",
+            font=("Arial", 8),
+            fg=SECONDARY,
+            bg="#F2F2F7",
+            wraplength=300,
+            justify="left"
+        ).pack(
+            anchor="w",
+            pady=(3, 8)
+        )
+
+        self.record_btn = self.create_button(
+            recording_inner,
+            "Start Conversation",
+            self.toggle_conversation_recording,
+            primary=True
+        )
+
+        self.record_btn.pack(
+            fill="x"
+        )
+
+        # ----------------------------------------------------
+        # Last conversation card
+        # ----------------------------------------------------
+
+        retrieval_card = tk.Frame(
+            right_frame,
+            bg=WHITE,
+            highlightthickness=1,
+            highlightbackground=BORDER
+        )
+
+        retrieval_card.pack(
+            fill="x",
+            padx=22,
+            pady=(0, 12)
+        )
+
+        retrieval_inner = tk.Frame(
+            retrieval_card,
+            bg=WHITE
+        )
+
+        retrieval_inner.pack(
+            fill="x",
+            padx=15,
+            pady=15
+        )
+
+        tk.Label(
+            retrieval_inner,
+            text="Latest memory",
+            font=("Arial", 11, "bold"),
+            fg=TEXT,
+            bg=WHITE
+        ).pack(
+            anchor="w"
+        )
 
         self.last_conv_label = tk.Label(
-            retrieval_frame,
-            text="",
-            font=("Arial", 10),
-            bg="#f2f2f2",
-            wraplength=320,
+            retrieval_inner,
+            text="No person recognized yet.",
+            font=("Arial", 9),
+            fg=SECONDARY,
+            bg=WHITE,
+            wraplength=315,
             justify="left"
         )
-        self.last_conv_label.pack(anchor="w")
 
-        self.view_conv_btn = tk.Button(
-            retrieval_frame,
-            text="📖 Retrieve Last Conversation",
-            state="disabled",
-            command=lambda: None
+        self.last_conv_label.pack(
+            anchor="w",
+            pady=(5, 8)
         )
-        self.view_conv_btn.pack(pady=5, fill="x")
 
-        # Scrollable transcript / summary text area
-        text_frame = tk.Frame(right_frame)
-        text_frame.pack(padx=15, pady=10, fill="both", expand=True)
+        self.view_conv_btn = self.create_button(
+            retrieval_inner,
+            "Retrieve Last Conversation",
+            lambda: None,
+            primary=False
+        )
 
-        scrollbar = tk.Scrollbar(text_frame)
-        scrollbar.pack(side="right", fill="y")
+        self.view_conv_btn.config(
+            state="disabled",
+            cursor="arrow"
+        )
+
+        self.view_conv_btn.pack(
+            fill="x"
+        )
+
+        # ----------------------------------------------------
+        # Transcript area
+        # ----------------------------------------------------
+
+        transcript_header = tk.Frame(
+            right_frame,
+            bg=WHITE
+        )
+
+        transcript_header.pack(
+            fill="x",
+            padx=22,
+            pady=(4, 5)
+        )
+
+        tk.Label(
+            transcript_header,
+            text="Memory",
+            font=("Arial", 11, "bold"),
+            fg=TEXT,
+            bg=WHITE
+        ).pack(
+            side="left"
+        )
+
+        text_frame = tk.Frame(
+            right_frame,
+            bg="#F2F2F7"
+        )
+
+        text_frame.pack(
+            padx=22,
+            pady=(0, 22),
+            fill="both",
+            expand=True
+        )
+
+        scrollbar = tk.Scrollbar(
+            text_frame,
+            bd=0,
+            relief="flat"
+        )
+
+        scrollbar.pack(
+            side="right",
+            fill="y"
+        )
 
         self.conversation_text = tk.Text(
             text_frame,
             wrap="word",
             font=("Arial", 10),
+            fg=TEXT,
+            bg="#F2F2F7",
+            insertbackground=TEXT,
+            selectbackground="#DCEBFF",
+            selectforeground=TEXT,
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=12,
             yscrollcommand=scrollbar.set,
             state="disabled"
         )
-        self.conversation_text.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self.conversation_text.yview)
 
-        self._set_conversation_text("No conversation loaded yet.")
+        self.conversation_text.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        scrollbar.config(
+            command=self.conversation_text.yview
+        )
+
+        self._set_conversation_text(
+            "No conversation loaded yet."
+        )
+
+    # ========================================================
+    # CONVERSATION TEXT
+    # ========================================================
 
     def _set_conversation_text(self, text):
-        self.conversation_text.config(state="normal")
-        self.conversation_text.delete("1.0", tk.END)
-        self.conversation_text.insert(tk.END, text)
-        self.conversation_text.config(state="disabled")
+
+        self.conversation_text.config(
+            state="normal"
+        )
+
+        self.conversation_text.delete(
+            "1.0",
+            tk.END
+        )
+
+        self.conversation_text.insert(
+            tk.END,
+            text
+        )
+
+        self.conversation_text.config(
+            state="disabled"
+        )
 
     def _append_conversation_text(self, text):
-        self.conversation_text.config(state="normal")
-        self.conversation_text.insert(tk.END, text)
-        self.conversation_text.see(tk.END)
-        self.conversation_text.config(state="disabled")
+
+        self.conversation_text.config(
+            state="normal"
+        )
+
+        self.conversation_text.insert(
+            tk.END,
+            text
+        )
+
+        self.conversation_text.see(
+            tk.END
+        )
+
+        self.conversation_text.config(
+            state="disabled"
+        )
 
     # ========================================================
     # AI MODEL WARMUP
@@ -327,9 +912,13 @@ class DementiaAssistantPro:
     def warmup_model(self):
 
         try:
+
             print("Loading DeepFace model...")
 
-            dummy = np.zeros((224, 224, 3), dtype=np.uint8)
+            dummy = np.zeros(
+                (224, 224, 3),
+                dtype=np.uint8
+            )
 
             DeepFace.represent(
                 img_path=dummy,
@@ -348,10 +937,14 @@ class DementiaAssistantPro:
             )
 
         except Exception as e:
+
             print("Model warmup error:", e)
+
             self.root.after(
                 0,
-                lambda: self.status_label.config(text=f"AI Error: {e}")
+                lambda err=e: self.status_label.config(
+                    text=f"AI Error: {err}"
+                )
             )
 
     # ========================================================
@@ -359,8 +952,15 @@ class DementiaAssistantPro:
     # ========================================================
 
     def normalize_embedding(self, embedding):
-        embedding = np.array(embedding, dtype=np.float32)
-        norm = np.linalg.norm(embedding)
+
+        embedding = np.array(
+            embedding,
+            dtype=np.float32
+        )
+
+        norm = np.linalg.norm(
+            embedding
+        )
 
         if norm == 0:
             return embedding
@@ -371,12 +971,30 @@ class DementiaAssistantPro:
     # COSINE DISTANCE
     # ========================================================
 
-    def cosine_distance(self, embedding1, embedding2):
-        embedding1 = self.normalize_embedding(embedding1)
-        embedding2 = self.normalize_embedding(embedding2)
+    def cosine_distance(
+        self,
+        embedding1,
+        embedding2
+    ):
 
-        similarity = np.dot(embedding1, embedding2)
-        similarity = np.clip(similarity, -1, 1)
+        embedding1 = self.normalize_embedding(
+            embedding1
+        )
+
+        embedding2 = self.normalize_embedding(
+            embedding2
+        )
+
+        similarity = np.dot(
+            embedding1,
+            embedding2
+        )
+
+        similarity = np.clip(
+            similarity,
+            -1,
+            1
+        )
 
         return 1 - similarity
 
@@ -394,17 +1012,26 @@ class DementiaAssistantPro:
 
         for name, data in self.people.items():
 
-            embeddings = data.get("embeddings", [])
+            embeddings = data.get(
+                "embeddings",
+                []
+            )
 
             for stored_embedding in embeddings:
 
-                distance = self.cosine_distance(embedding, stored_embedding)
+                distance = self.cosine_distance(
+                    embedding,
+                    stored_embedding
+                )
 
                 if distance < best_distance:
                     best_distance = distance
                     best_name = name
 
-        if best_name is not None and best_distance <= MATCH_THRESHOLD:
+        if (
+            best_name is not None
+            and best_distance <= MATCH_THRESHOLD
+        ):
             return best_name, best_distance
 
         return None, best_distance
@@ -435,22 +1062,29 @@ class DementiaAssistantPro:
     def process_frame(self, frame):
 
         results = []
+
         now = time.time()
+
         used_track_ids = set()
 
-        # Remove stale tracks that exceeded TRACK_TIMEOUT
         stale_ids = [
-            tid for tid, info in self.tracked_faces.items()
+            tid
+            for tid, info in self.tracked_faces.items()
             if now - info["last_seen"] > TRACK_TIMEOUT
         ]
+
         for tid in stale_ids:
+
             del self.tracked_faces[tid]
+
             if tid in self.identity_history:
                 del self.identity_history[tid]
+
             if tid in self.ui_positions:
                 del self.ui_positions[tid]
 
         try:
+
             faces = DeepFace.extract_faces(
                 img_path=frame,
                 detector_backend=DETECTOR_BACKEND,
@@ -461,16 +1095,31 @@ class DementiaAssistantPro:
             for face_data in faces:
 
                 face_image = face_data.get("face")
-                facial_area = face_data.get("facial_area", {})
-                confidence = face_data.get("confidence", 0)
+
+                facial_area = face_data.get(
+                    "facial_area",
+                    {}
+                )
+
+                confidence = face_data.get(
+                    "confidence",
+                    0
+                )
 
                 if face_image is None:
                     continue
 
                 if face_image.max() <= 1.0:
-                    face_image = (face_image * 255).astype(np.uint8)
+
+                    face_image = (
+                        face_image * 255
+                    ).astype(np.uint8)
+
                 else:
-                    face_image = face_image.astype(np.uint8)
+
+                    face_image = (
+                        face_image.astype(np.uint8)
+                    )
 
                 if confidence < FACE_DETECTION_CONFIDENCE:
                     continue
@@ -490,29 +1139,35 @@ class DementiaAssistantPro:
 
                 embedding = representation[0]["embedding"]
 
-                name, distance = self.find_best_match(embedding)
+                name, distance = self.find_best_match(
+                    embedding
+                )
 
                 x = facial_area.get("x", 0)
                 y = facial_area.get("y", 0)
                 w = facial_area.get("w", 0)
                 h = facial_area.get("h", 0)
 
-                # --------------------------------------------
-                # Assign a stable track_id based on face position,
-                # so the same head keeps the same id across frames.
-                # --------------------------------------------
-
                 cx = x + w // 2
                 cy = y + h // 2
 
-                track_id = self._match_track_id(cx, cy, used_track_ids)
+                track_id = self._match_track_id(
+                    cx,
+                    cy,
+                    used_track_ids
+                )
+
                 used_track_ids.add(track_id)
+
                 self.tracked_faces[track_id] = {
                     "pos": (cx, cy),
                     "last_seen": now
                 }
 
-                stable_name = self.stabilize_identity(track_id, name)
+                stable_name = self.stabilize_identity(
+                    track_id,
+                    name
+                )
 
                 results.append({
                     "name": name,
@@ -526,16 +1181,25 @@ class DementiaAssistantPro:
                 })
 
         except Exception as e:
-            print("AI processing error:", e)
+
+            print(
+                "AI processing error:",
+                e
+            )
 
         return results
 
-    def _match_track_id(self, cx, cy, used_track_ids, max_distance=120):
-        """
-        Finds the closest existing track (within TRACK_TIMEOUT) to
-        the point (cx, cy) that hasn't already been claimed this frame.
-        Falls back to handing out a brand new track_id.
-        """
+    # ========================================================
+    # TRACKING
+    # ========================================================
+
+    def _match_track_id(
+        self,
+        cx,
+        cy,
+        used_track_ids,
+        max_distance=120
+    ):
 
         best_id = None
         best_dist = max_distance
@@ -546,13 +1210,20 @@ class DementiaAssistantPro:
                 continue
 
             px, py = info["pos"]
-            dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+
+            dist = (
+                (cx - px) ** 2
+                +
+                (cy - py) ** 2
+            ) ** 0.5
 
             if dist < best_dist:
+
                 best_dist = dist
                 best_id = track_id
 
         if best_id is None:
+
             best_id = self.next_track_id
             self.next_track_id += 1
 
@@ -562,12 +1233,19 @@ class DementiaAssistantPro:
     # IDENTITY STABILIZATION
     # ========================================================
 
-    def stabilize_identity(self, track_id, name):
+    def stabilize_identity(
+        self,
+        track_id,
+        name
+    ):
 
         if name is None:
             return None
 
-        history = self.identity_history[track_id]
+        history = self.identity_history[
+            track_id
+        ]
+
         history.append(name)
 
         if len(history) < REQUIRED_CONFIRMATIONS:
@@ -576,11 +1254,20 @@ class DementiaAssistantPro:
         counts = {}
 
         for item in history:
-            counts[item] = counts.get(item, 0) + 1
 
-        best_name = max(counts, key=counts.get)
+            counts[item] = (
+                counts.get(item, 0) + 1
+            )
 
-        if counts[best_name] >= REQUIRED_CONFIRMATIONS:
+        best_name = max(
+            counts,
+            key=counts.get
+        )
+
+        if (
+            counts[best_name]
+            >= REQUIRED_CONFIRMATIONS
+        ):
             return best_name
 
         return None
@@ -589,7 +1276,11 @@ class DementiaAssistantPro:
     # DRAW RESULTS
     # ========================================================
 
-    def draw_results(self, frame, results):
+    def draw_results(
+        self,
+        frame,
+        results
+    ):
 
         recognized_people = []
 
@@ -600,9 +1291,15 @@ class DementiaAssistantPro:
             w = result["w"]
             h = result["h"]
 
-            track_id = result.get("track_id")
+            track_id = result.get(
+                "track_id"
+            )
+
             name = result["name"]
-            stable_name = result.get("stable_name")
+
+            stable_name = result.get(
+                "stable_name"
+            )
 
             # ------------------------------------------------
             # Determine displayed information
@@ -612,12 +1309,17 @@ class DementiaAssistantPro:
 
                 display_name = stable_name
 
-                relationship = self.people[stable_name].get(
-                    "relationship", ""
+                relationship = self.people[
+                    stable_name
+                ].get(
+                    "relationship",
+                    ""
                 )
 
                 if stable_name not in recognized_people:
-                    recognized_people.append(stable_name)
+                    recognized_people.append(
+                        stable_name
+                    )
 
                 status = "Recognized"
 
@@ -639,7 +1341,6 @@ class DementiaAssistantPro:
 
             target_x = x + w // 2
 
-            # Put card above head
             target_y = y - 20
 
             # ------------------------------------------------
@@ -647,17 +1348,57 @@ class DementiaAssistantPro:
             # ------------------------------------------------
 
             if track_id not in self.ui_positions:
-                self.ui_positions[track_id] = (target_x, target_y)
+
+                self.ui_positions[
+                    track_id
+                ] = (
+                    target_x,
+                    target_y
+                )
 
             else:
-                old_x, old_y = self.ui_positions[track_id]
 
-                new_x = old_x + (target_x - old_x) * self.ui_smoothing
-                new_y = old_y + (target_y - old_y) * self.ui_smoothing
+                old_x, old_y = (
+                    self.ui_positions[
+                        track_id
+                    ]
+                )
 
-                self.ui_positions[track_id] = (new_x, new_y)
+                new_x = (
+                    old_x
+                    +
+                    (
+                        target_x
+                        -
+                        old_x
+                    )
+                    *
+                    self.ui_smoothing
+                )
 
-            card_x, card_y = self.ui_positions[track_id]
+                new_y = (
+                    old_y
+                    +
+                    (
+                        target_y
+                        -
+                        old_y
+                    )
+                    *
+                    self.ui_smoothing
+                )
+
+                self.ui_positions[
+                    track_id
+                ] = (
+                    new_x,
+                    new_y
+                )
+
+            card_x, card_y = self.ui_positions[
+                track_id
+            ]
+
             card_x = int(card_x)
             card_y = int(card_y)
 
@@ -666,9 +1407,12 @@ class DementiaAssistantPro:
             # ------------------------------------------------
 
             if relationship:
+
                 card_width = 230
                 card_height = 68
+
             else:
+
                 card_width = 180
                 card_height = 58
 
@@ -678,14 +1422,39 @@ class DementiaAssistantPro:
 
             card_x = max(
                 card_width // 2 + 10,
-                min(card_x, frame.shape[1] - card_width // 2 - 10)
+                min(
+                    card_x,
+                    frame.shape[1]
+                    -
+                    card_width // 2
+                    -
+                    10
+                )
             )
 
-            card_y = max(card_height + 10, card_y)
+            card_y = max(
+                card_height + 10,
+                card_y
+            )
 
-            left = int(card_x - card_width // 2)
-            top = int(card_y - card_height)
-            right = int(card_x + card_width // 2)
+            left = int(
+                card_x
+                -
+                card_width // 2
+            )
+
+            top = int(
+                card_y
+                -
+                card_height
+            )
+
+            right = int(
+                card_x
+                +
+                card_width // 2
+            )
+
             bottom = int(card_y)
 
             # ------------------------------------------------
@@ -701,24 +1470,89 @@ class DementiaAssistantPro:
             radius = 18
 
             cv2.rectangle(
-                overlay, (left + radius, top), (right - radius, bottom),
-                (25, 25, 25), -1
-            )
-            cv2.rectangle(
-                overlay, (left, top + radius), (right, bottom - radius),
-                (25, 25, 25), -1
+                overlay,
+                (
+                    left + radius,
+                    top
+                ),
+                (
+                    right - radius,
+                    bottom
+                ),
+                (25, 25, 25),
+                -1
             )
 
-            cv2.circle(overlay, (left + radius, top + radius), radius, (25, 25, 25), -1)
-            cv2.circle(overlay, (right - radius, top + radius), radius, (25, 25, 25), -1)
-            cv2.circle(overlay, (left + radius, bottom - radius), radius, (25, 25, 25), -1)
-            cv2.circle(overlay, (right - radius, bottom - radius), radius, (25, 25, 25), -1)
+            cv2.rectangle(
+                overlay,
+                (
+                    left,
+                    top + radius
+                ),
+                (
+                    right,
+                    bottom - radius
+                ),
+                (25, 25, 25),
+                -1
+            )
+
+            cv2.circle(
+                overlay,
+                (
+                    left + radius,
+                    top + radius
+                ),
+                radius,
+                (25, 25, 25),
+                -1
+            )
+
+            cv2.circle(
+                overlay,
+                (
+                    right - radius,
+                    top + radius
+                ),
+                radius,
+                (25, 25, 25),
+                -1
+            )
+
+            cv2.circle(
+                overlay,
+                (
+                    left + radius,
+                    bottom - radius
+                ),
+                radius,
+                (25, 25, 25),
+                -1
+            )
+
+            cv2.circle(
+                overlay,
+                (
+                    right - radius,
+                    bottom - radius
+                ),
+                radius,
+                (25, 25, 25),
+                -1
+            )
 
             # ------------------------------------------------
             # Transparency
             # ------------------------------------------------
 
-            cv2.addWeighted(overlay, 0.82, frame, 0.18, 0, frame)
+            cv2.addWeighted(
+                overlay,
+                0.82,
+                frame,
+                0.18,
+                0,
+                frame
+            )
 
             # ------------------------------------------------
             # Small status indicator
@@ -728,13 +1562,39 @@ class DementiaAssistantPro:
             dot_y = top + 23
 
             if status == "Recognized":
-                dot_color = (80, 220, 120)
-            elif status == "Identifying":
-                dot_color = (230, 190, 70)
-            else:
-                dot_color = (150, 150, 150)
 
-            cv2.circle(frame, (dot_x, dot_y), 5, dot_color, -1)
+                dot_color = (
+                    80,
+                    220,
+                    120
+                )
+
+            elif status == "Identifying":
+
+                dot_color = (
+                    230,
+                    190,
+                    70
+                )
+
+            else:
+
+                dot_color = (
+                    150,
+                    150,
+                    150
+                )
+
+            cv2.circle(
+                frame,
+                (
+                    dot_x,
+                    dot_y
+                ),
+                5,
+                dot_color,
+                -1
+            )
 
             # ------------------------------------------------
             # Name
@@ -743,8 +1603,17 @@ class DementiaAssistantPro:
             text_x = left + 38
 
             cv2.putText(
-                frame, display_name, (text_x, top + 29),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (245, 245, 245), 2, cv2.LINE_AA
+                frame,
+                display_name,
+                (
+                    text_x,
+                    top + 29
+                ),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (245, 245, 245),
+                2,
+                cv2.LINE_AA
             )
 
             # ------------------------------------------------
@@ -752,47 +1621,81 @@ class DementiaAssistantPro:
             # ------------------------------------------------
 
             if relationship:
+
                 cv2.putText(
-                    frame, relationship, (text_x, top + 51),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (175, 175, 175), 1, cv2.LINE_AA
+                    frame,
+                    relationship,
+                    (
+                        text_x,
+                        top + 51
+                    ),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.64,
+                    (175, 175, 175),
+                    1,
+                    cv2.LINE_AA
                 )
 
             # ------------------------------------------------
             # Small connector line
             # ------------------------------------------------
 
-            line_start = (card_x, bottom)
-            line_end = (x + w // 2, y)
+            line_start = (
+                card_x,
+                bottom
+            )
 
-            cv2.line(frame, line_start, line_end, (100, 100, 100), 1, cv2.LINE_AA)
+            line_end = (
+                x + w // 2,
+                y
+            )
+
+            cv2.line(
+                frame,
+                line_start,
+                line_end,
+                (100, 100, 100),
+                1,
+                cv2.LINE_AA
+            )
 
         # ----------------------------------------------------
-        # Save recognized people (used by conversation tagging /
-        # the "retrieve last conversation" hook)
+        # Save recognized people
         # ----------------------------------------------------
 
         self.current_people = recognized_people
 
         if recognized_people:
-            self.current_person = recognized_people[-1]
+
+            self.current_person = (
+                recognized_people[-1]
+            )
 
         # ----------------------------------------------------
-        # Remove old UI tracks that expired from tracked_faces
+        # Remove old UI tracks
         # ----------------------------------------------------
 
-        for track_id in list(self.ui_positions.keys()):
+        for track_id in list(
+            self.ui_positions.keys()
+        ):
+
             if track_id not in self.tracked_faces:
-                del self.ui_positions[track_id]
+
+                del self.ui_positions[
+                    track_id
+                ]
 
         return frame
 
     # ========================================================
-    # PERSON RECOGNIZED HOOK
+    # PERSON RECOGNIZED
     # ========================================================
 
     def on_person_recognized(self, name):
-        """Called once per new stable detection of `name`."""
-        self.refresh_last_conversation_button(name)
+
+        self.refresh_last_conversation_button(
+            name
+        )
 
     # ========================================================
     # CAMERA LOOP
@@ -806,39 +1709,89 @@ class DementiaAssistantPro:
         ret, frame = self.cap.read()
 
         if not ret:
-            self.root.after(30, self.update_video)
+
+            self.root.after(
+                30,
+                self.update_video
+            )
+
             return
 
-        frame = cv2.flip(frame, 1)
+        frame = cv2.flip(
+            frame,
+            1
+        )
+
         self.frame_count += 1
 
-        if self.frame_count % AI_FRAME_SKIP == 0 and not self.processing:
+        if (
+            self.frame_count
+            %
+            AI_FRAME_SKIP
+            == 0
+            and not self.processing
+        ):
+
             self.processing = True
+
             ai_frame = frame.copy()
 
             threading.Thread(
-                target=self.run_ai, args=(ai_frame,), daemon=True
+                target=self.run_ai,
+                args=(ai_frame,),
+                daemon=True
             ).start()
 
-        frame = self.draw_results(frame, self.last_results)
+        frame = self.draw_results(
+            frame,
+            self.last_results
+        )
 
-        # Fire the "person recognized" hook once per new appearance
-        currently_recognized = set(self.current_people)
+        currently_recognized = set(
+            self.current_people
+        )
 
-        for name in currently_recognized - self.previously_recognized:
-            self.on_person_recognized(name)
+        for name in (
+            currently_recognized
+            -
+            self.previously_recognized
+        ):
 
-        self.previously_recognized = currently_recognized
+            self.on_person_recognized(
+                name
+            )
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(rgb)
-        image = image.resize((950, 620))
-        photo = ImageTk.PhotoImage(image=image)
+        self.previously_recognized = (
+            currently_recognized
+        )
 
-        self.video_label.configure(image=photo)
+        rgb = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2RGB
+        )
+
+        image = Image.fromarray(
+            rgb
+        )
+
+        image = image.resize(
+            (950, 620)
+        )
+
+        photo = ImageTk.PhotoImage(
+            image=image
+        )
+
+        self.video_label.configure(
+            image=photo
+        )
+
         self.video_label.image = photo
 
-        self.root.after(15, self.update_video)
+        self.root.after(
+            15,
+            self.update_video
+        )
 
     # ========================================================
     # BACKGROUND AI
@@ -847,26 +1800,49 @@ class DementiaAssistantPro:
     def run_ai(self, frame):
 
         try:
-            results = self.process_frame(frame)
+
+            results = self.process_frame(
+                frame
+            )
+
             self.last_results = results
 
             recognized = None
 
             for result in results:
+
                 if result["name"]:
+
                     recognized = result["name"]
                     break
 
             if recognized:
-                relationship = self.people[recognized].get("relationship", "")
+
+                relationship = self.people[
+                    recognized
+                ].get(
+                    "relationship",
+                    ""
+                )
 
                 self.root.after(
                     0,
-                    lambda n=recognized, r=relationship:
-                    self.status_label.config(text=f"Detected: {n} ({r})")
+                    lambda n=recognized,
+                    r=relationship:
+                    self.status_label.config(
+                        text=f"Detected: {n} ({r})"
+                    )
+                )
+
+                self.root.after(
+                    0,
+                    lambda: self.status_dot.config(
+                        fg=SUCCESS
+                    )
                 )
 
             elif results:
+
                 self.root.after(
                     0,
                     lambda: self.status_label.config(
@@ -874,7 +1850,15 @@ class DementiaAssistantPro:
                     )
                 )
 
+                self.root.after(
+                    0,
+                    lambda: self.status_dot.config(
+                        fg=WARNING
+                    )
+                )
+
             else:
+
                 self.root.after(
                     0,
                     lambda: self.status_label.config(
@@ -882,10 +1866,22 @@ class DementiaAssistantPro:
                     )
                 )
 
+                self.root.after(
+                    0,
+                    lambda: self.status_dot.config(
+                        fg=SUCCESS
+                    )
+                )
+
         except Exception as e:
-            print("Background AI error:", e)
+
+            print(
+                "Background AI error:",
+                e
+            )
 
         finally:
+
             self.processing = False
 
     # ========================================================
@@ -895,40 +1891,84 @@ class DementiaAssistantPro:
     def register_person(self):
 
         name = self.name_entry.get().strip()
-        relationship = self.relationship_entry.get().strip()
+
+        relationship = (
+            self.relationship_entry
+            .get()
+            .strip()
+        )
 
         if not name:
-            messagebox.showwarning("Missing Name", "Please enter the person's name.")
+
+            messagebox.showwarning(
+                "Missing Name",
+                "Please enter the person's name."
+            )
+
             return
 
         if not relationship:
-            messagebox.showwarning("Missing Relationship", "Please enter the relationship.")
+
+            messagebox.showwarning(
+                "Missing Relationship",
+                "Please enter the relationship."
+            )
+
             return
 
-        self.status_label.config(text=f"Look at the camera to register {name}...")
-        self.register_btn.config(state="disabled")
-        self.register_voice_btn.config(state="disabled")
+        self.status_label.config(
+            text=f"Look at the camera to register {name}..."
+        )
+
+        self.register_btn.config(
+            state="disabled"
+        )
+
+        self.register_voice_btn.config(
+            state="disabled"
+        )
 
         threading.Thread(
-            target=self.capture_registration, args=(name, relationship), daemon=True
+            target=self.capture_registration,
+            args=(
+                name,
+                relationship
+            ),
+            daemon=True
         ).start()
 
     # ========================================================
     # CAPTURE REGISTRATION
     # ========================================================
 
-    def capture_registration(self, name, relationship):
+    def capture_registration(
+        self,
+        name,
+        relationship
+    ):
 
         embeddings = []
 
-        print(f"Starting registration for {name}")
+        print(
+            f"Starting registration for {name}"
+        )
 
         start_time = time.time()
 
         while len(embeddings) < MAX_EMBEDDINGS_PER_PERSON:
 
-            if time.time() - start_time > 30:
-                print("Registration timeout.")
+            if (
+                time.time()
+                -
+                start_time
+                >
+                30
+            ):
+
+                print(
+                    "Registration timeout."
+                )
+
                 break
 
             ret, frame = self.cap.read()
@@ -936,9 +1976,13 @@ class DementiaAssistantPro:
             if not ret:
                 continue
 
-            frame = cv2.flip(frame, 1)
+            frame = cv2.flip(
+                frame,
+                1
+            )
 
             try:
+
                 faces = DeepFace.extract_faces(
                     img_path=frame,
                     detector_backend=DETECTOR_BACKEND,
@@ -947,16 +1991,29 @@ class DementiaAssistantPro:
                 )
 
                 if len(faces) == 0:
+
                     self.root.after(
                         0,
-                        lambda: self.status_label.config(text="No face detected...")
+                        lambda:
+                        self.status_label.config(
+                            text="No face detected..."
+                        )
                     )
+
                     time.sleep(0.2)
+
                     continue
 
                 face_data = faces[0]
-                face_image = face_data.get("face")
-                confidence = face_data.get("confidence", 0)
+
+                face_image = face_data.get(
+                    "face"
+                )
+
+                confidence = face_data.get(
+                    "confidence",
+                    0
+                )
 
                 if face_image is None:
                     continue
@@ -965,11 +2022,22 @@ class DementiaAssistantPro:
                     continue
 
                 if face_image.max() <= 1.0:
-                    face_image = (face_image * 255).astype(np.uint8)
-                else:
-                    face_image = face_image.astype(np.uint8)
 
-                if not self.good_face(face_image):
+                    face_image = (
+                        face_image * 255
+                    ).astype(np.uint8)
+
+                else:
+
+                    face_image = (
+                        face_image.astype(
+                            np.uint8
+                        )
+                    )
+
+                if not self.good_face(
+                    face_image
+                ):
                     continue
 
                 representation = DeepFace.represent(
@@ -982,49 +2050,83 @@ class DementiaAssistantPro:
                 if not representation:
                     continue
 
-                embedding = representation[0]["embedding"]
-                embedding = self.normalize_embedding(embedding)
+                embedding = representation[0][
+                    "embedding"
+                ]
+
+                embedding = (
+                    self.normalize_embedding(
+                        embedding
+                    )
+                )
 
                 duplicate = False
 
                 for old_embedding in embeddings:
-                    distance = self.cosine_distance(embedding, old_embedding)
+
+                    distance = self.cosine_distance(
+                        embedding,
+                        old_embedding
+                    )
+
                     if distance < 0.05:
+
                         duplicate = True
                         break
 
                 if duplicate:
                     continue
 
-                embeddings.append(embedding)
-                count = len(embeddings)
+                embeddings.append(
+                    embedding
+                )
+
+                count = len(
+                    embeddings
+                )
 
                 self.root.after(
                     0,
-                    lambda c=count: self.status_label.config(
+                    lambda c=count:
+                    self.status_label.config(
                         text=f"Capturing face {c}/{MAX_EMBEDDINGS_PER_PERSON}..."
                     )
                 )
 
-                print(f"Captured embedding {count}/{MAX_EMBEDDINGS_PER_PERSON}")
+                print(
+                    f"Captured embedding {count}/{MAX_EMBEDDINGS_PER_PERSON}"
+                )
+
                 time.sleep(0.5)
 
             except Exception as e:
-                print("Registration AI error:", e)
+
+                print(
+                    "Registration AI error:",
+                    e
+                )
 
         if len(embeddings) < REQUIRED_CONFIRMATIONS:
+
             self.root.after(
                 0,
-                lambda: messagebox.showwarning(
+                lambda:
+                messagebox.showwarning(
                     "Registration Failed",
                     "Could not capture enough good face samples."
                 )
             )
+
             self.root.after(
-                0, lambda: self.status_label.config(text="Registration failed.")
+                0,
+                lambda:
+                self.status_label.config(
+                    text="Registration failed."
+                )
             )
 
         else:
+
             self.people[name] = {
                 "relationship": relationship,
                 "embeddings": embeddings,
@@ -1036,60 +2138,102 @@ class DementiaAssistantPro:
 
             self.root.after(
                 0,
-                lambda: messagebox.showinfo(
+                lambda:
+                messagebox.showinfo(
                     "Registration Successful",
                     f"{name} has been registered successfully."
                 )
             )
+
             self.root.after(
                 0,
-                lambda: self.status_label.config(
+                lambda:
+                self.status_label.config(
                     text=f"Registered: {name} ({relationship})"
                 )
             )
 
-        self.root.after(0, lambda: self.register_btn.config(state="normal"))
-        self.root.after(0, lambda: self.register_voice_btn.config(state="normal"))
+        self.root.after(
+            0,
+            lambda:
+            self.register_btn.config(
+                state="normal"
+            )
+        )
+
+        self.root.after(
+            0,
+            lambda:
+            self.register_voice_btn.config(
+                state="normal"
+            )
+        )
 
     # ========================================================
-    # VOICE REGISTRATION BUTTON
+    # VOICE REGISTRATION
     # ========================================================
 
     def voice_register_person(self):
 
-        self.register_voice_btn.config(state="disabled")
-        self.register_btn.config(state="disabled")
-
-        self.status_label.config(
-            text="🎤 Listening... Say: Hello, I am Rahul, your son"
+        self.register_voice_btn.config(
+            state="disabled"
         )
 
-        threading.Thread(target=self.run_voice_registration, daemon=True).start()
+        self.register_btn.config(
+            state="disabled"
+        )
+
+        self.status_label.config(
+            text="Listening... Say: Hello, I am Rahul, your son"
+        )
+
+        threading.Thread(
+            target=self.run_voice_registration,
+            daemon=True
+        ).start()
 
     def run_voice_registration(self):
 
         try:
+
             person = register_from_voice()
 
             if person is None:
+
                 self.root.after(
                     0,
-                    lambda: self.status_label.config(
+                    lambda:
+                    self.status_label.config(
                         text="Could not understand registration."
                     )
                 )
+
                 return
 
             name = person["name"]
-            relationship = person["relationship"]
 
-            print("Voice registration:")
-            print("Name:", name)
-            print("Relationship:", relationship)
+            relationship = person[
+                "relationship"
+            ]
+
+            print(
+                "Voice registration:"
+            )
+
+            print(
+                "Name:",
+                name
+            )
+
+            print(
+                "Relationship:",
+                relationship
+            )
 
             self.root.after(
                 0,
-                lambda: self.status_label.config(
+                lambda:
+                self.status_label.config(
                     text=f"Voice recognized: {name} ({relationship})"
                 )
             )
@@ -1098,34 +2242,62 @@ class DementiaAssistantPro:
 
             self.root.after(
                 0,
-                lambda: self.status_label.config(
+                lambda:
+                self.status_label.config(
                     text=f"Look at the camera to register {name}..."
                 )
             )
 
-            self.capture_registration(name, relationship)
+            self.capture_registration(
+                name,
+                relationship
+            )
 
         except Exception as e:
-            print("Voice registration error:", e)
+
+            print(
+                "Voice registration error:",
+                e
+            )
+
             self.root.after(
                 0,
-                lambda err=e: self.status_label.config(
+                lambda err=e:
+                self.status_label.config(
                     text=f"Voice registration error: {err}"
                 )
             )
 
         finally:
-            self.root.after(0, lambda: self.register_voice_btn.config(state="normal"))
-            self.root.after(0, lambda: self.register_btn.config(state="normal"))
+
+            self.root.after(
+                0,
+                lambda:
+                self.register_voice_btn.config(
+                    state="normal"
+                )
+            )
+
+            self.root.after(
+                0,
+                lambda:
+                self.register_btn.config(
+                    state="normal"
+                )
+            )
 
     # ========================================================
     # CONVERSATION RECORDING
     # ========================================================
 
     def toggle_conversation_recording(self):
+
         if not self.recording:
+
             self.start_conversation_recording()
+
         else:
+
             self.stop_conversation_recording()
 
     def start_conversation_recording(self):
@@ -1133,129 +2305,240 @@ class DementiaAssistantPro:
         target = self.current_person
 
         if target is None:
+
             target = self.prompt_for_person_name()
+
             if target is None:
                 return
 
         self.recording_target_person = target
 
-        self._set_conversation_text(f"🎙️ Recording conversation with {target}...\n\n")
+        self._set_conversation_text(
+            f"Recording conversation with {target}...\n\n"
+        )
 
         self.speech_recorder = SpeechRecorder(
             on_partial_text=self.on_partial_transcript
         )
 
         try:
+
             self.speech_recorder.start()
+
         except Exception as e:
+
             messagebox.showerror(
-                "Microphone Error", f"Could not start recording:\n{e}"
+                "Microphone Error",
+                f"Could not start recording:\n{e}"
             )
+
             return
 
         self.recording = True
-        self.record_btn.config(text="⏹ Stop & Save Conversation")
+
+        self.record_btn.config(
+            text="Stop & Save Conversation",
+            bg=DANGER,
+            activebackground="#D72F25",
+            fg=WHITE,
+            activeforeground=WHITE
+        )
 
     def prompt_for_person_name(self):
 
         if not self.people:
+
             messagebox.showwarning(
-                "No People Registered", "Please register a person first."
+                "No People Registered",
+                "Please register a person first."
             )
+
             return None
 
         name = simpledialog.askstring(
             "Who is this conversation with?",
-            "No one is currently recognized.\nEnter the registered person's name:"
+            "No one is currently recognized.\n"
+            "Enter the registered person's name:"
         )
 
         if name and name in self.people:
+
             return name
 
         if name:
+
             messagebox.showwarning(
-                "Unknown Person", f"'{name}' is not a registered person."
+                "Unknown Person",
+                f"'{name}' is not a registered person."
             )
 
         return None
 
     def on_partial_transcript(self, text):
-        self.root.after(0, lambda: self._append_conversation_text(text + " "))
+
+        self.root.after(
+            0,
+            lambda:
+            self._append_conversation_text(
+                text + " "
+            )
+        )
 
     def stop_conversation_recording(self):
 
         if not self.speech_recorder:
-            print("ERROR: No speech recorder exists.")
+
+            print(
+                "ERROR: No speech recorder exists."
+            )
+
             return
 
-        print("\n========================================")
-        print("STOPPING CONVERSATION RECORDING")
-        print("========================================")
+        print(
+            "\n========================================"
+        )
+
+        print(
+            "STOPPING CONVERSATION RECORDING"
+        )
+
+        print(
+            "========================================"
+        )
 
         try:
-            transcript = self.speech_recorder.stop()
 
-            print("Speech recorder stopped.")
-            print("Transcript received:")
-            print(repr(transcript))
-            print("Transcript length:", len(transcript) if transcript else 0)
+            transcript = (
+                self.speech_recorder.stop()
+            )
+
+            print(
+                "Speech recorder stopped."
+            )
+
+            print(
+                "Transcript received:"
+            )
+
+            print(
+                repr(transcript)
+            )
+
+            print(
+                "Transcript length:",
+                len(transcript)
+                if transcript
+                else 0
+            )
 
         except Exception as e:
-            print("ERROR while stopping recorder:", repr(e))
+
+            print(
+                "ERROR while stopping recorder:",
+                repr(e)
+            )
 
             self.recording = False
+
             self.record_btn.config(
-                text="🎙️ Start Conversation",
-                state="normal"
+                text="Start Conversation",
+                state="normal",
+                bg=ACCENT,
+                activebackground=ACCENT_DARK,
+                fg=WHITE
             )
 
             messagebox.showerror(
                 "Recording Error",
                 f"Could not stop recording:\n\n{e}"
             )
+
             return
 
         self.recording = False
 
         self.record_btn.config(
-            text="🎙️ Start Conversation",
+            text="Processing Conversation...",
             state="disabled"
         )
 
         self._set_conversation_text(
-            "🤖 Generating AI summary...\n\nPlease wait..."
+            "Generating AI summary...\n\n"
+            "Please wait..."
         )
 
-        target = self.recording_target_person
+        target = (
+            self.recording_target_person
+        )
 
-        print("Conversation target:", target)
-        print("Starting processing thread...")
+        print(
+            "Conversation target:",
+            target
+        )
+
+        print(
+            "Starting processing thread..."
+        )
 
         threading.Thread(
             target=self._process_and_save_conversation,
-            args=(target, transcript),
+            args=(
+                target,
+                transcript
+            ),
             daemon=True
         ).start()
 
-    def _process_and_save_conversation(self, name, transcript):
+    def _process_and_save_conversation(
+        self,
+        name,
+        transcript
+    ):
 
         try:
 
-            print("\n========================================")
-            print("CONVERSATION PROCESSING")
-            print("========================================")
+            print(
+                "\n========================================"
+            )
 
-            print("Person:", name)
-            print("Transcript:", repr(transcript))
-            print("Transcript length:", len(transcript) if transcript else 0)
+            print(
+                "CONVERSATION PROCESSING"
+            )
+
+            print(
+                "========================================"
+            )
+
+            print(
+                "Person:",
+                name
+            )
+
+            print(
+                "Transcript:",
+                repr(transcript)
+            )
+
+            print(
+                "Transcript length:",
+                len(transcript)
+                if transcript
+                else 0
+            )
 
             # -----------------------------------------
             # CHECK TRANSCRIPT
             # -----------------------------------------
 
-            if not transcript or not transcript.strip():
+            if (
+                not transcript
+                or
+                not transcript.strip()
+            ):
 
-                print("ERROR: Transcript is empty!")
+                print(
+                    "ERROR: Transcript is empty!"
+                )
 
                 raise ValueError(
                     "The speech recorder returned an empty transcript."
@@ -1265,17 +2548,28 @@ class DementiaAssistantPro:
             # GENERATE SUMMARY
             # -----------------------------------------
 
-            print("\nSTEP 1 -> Calling summarize_text()...")
+            print(
+                "\nSTEP 1 -> Calling summarize_text()..."
+            )
 
             summary = summarize_text(
                 transcript,
                 name=name
             )
 
-            print("STEP 2 -> Summary returned:")
-            print(repr(summary))
+            print(
+                "STEP 2 -> Summary returned:"
+            )
 
-            if not summary or not summary.strip():
+            print(
+                repr(summary)
+            )
+
+            if (
+                not summary
+                or
+                not summary.strip()
+            ):
 
                 raise ValueError(
                     "summarize_text() returned an empty summary."
@@ -1285,7 +2579,9 @@ class DementiaAssistantPro:
             # SAVE FILES
             # -----------------------------------------
 
-            print("\nSTEP 3 -> Saving conversation files...")
+            print(
+                "\nSTEP 3 -> Saving conversation files..."
+            )
 
             record = save_conversation_files(
                 name,
@@ -1293,19 +2589,33 @@ class DementiaAssistantPro:
                 summary
             )
 
-            print("STEP 4 -> Conversation files saved.")
+            print(
+                "STEP 4 -> Conversation files saved."
+            )
 
-            print("Transcript file:")
-            print(record["transcript_file"])
+            print(
+                "Transcript file:"
+            )
 
-            print("Summary file:")
-            print(record["summary_file"])
+            print(
+                record["transcript_file"]
+            )
+
+            print(
+                "Summary file:"
+            )
+
+            print(
+                record["summary_file"]
+            )
 
             # -----------------------------------------
             # DATABASE
             # -----------------------------------------
 
-            print("\nSTEP 5 -> Updating database...")
+            print(
+                "\nSTEP 5 -> Updating database..."
+            )
 
             self.people.setdefault(
                 name,
@@ -1321,15 +2631,29 @@ class DementiaAssistantPro:
                 []
             )
 
-            self.people[name]["conversations"].append(record)
+            self.people[name][
+                "conversations"
+            ].append(
+                record
+            )
 
             self.save_database()
 
-            print("STEP 6 -> Database saved.")
+            print(
+                "STEP 6 -> Database saved."
+            )
 
-            print("\n========================================")
-            print("CONVERSATION PROCESSING COMPLETE")
-            print("========================================\n")
+            print(
+                "\n========================================"
+            )
+
+            print(
+                "CONVERSATION PROCESSING COMPLETE"
+            )
+
+            print(
+                "========================================\n"
+            )
 
             # -----------------------------------------
             # UPDATE UI
@@ -1338,16 +2662,33 @@ class DementiaAssistantPro:
             self.root.after(
                 0,
                 lambda n=name, r=record:
-                self._show_summary(n, r)
+                self._show_summary(
+                    n,
+                    r
+                )
             )
 
         except Exception as e:
 
-            print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print("CONVERSATION PROCESSING ERROR")
-            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print(repr(e))
-            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
+            print(
+                "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            )
+
+            print(
+                "CONVERSATION PROCESSING ERROR"
+            )
+
+            print(
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            )
+
+            print(
+                repr(e)
+            )
+
+            print(
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+            )
 
             error_message = str(e)
 
@@ -1364,43 +2705,98 @@ class DementiaAssistantPro:
 
             self.root.after(
                 0,
-                lambda: self.record_btn.config(
-                    state="normal"
+                lambda:
+                self.record_btn.config(
+                    text="Start Conversation",
+                    state="normal",
+                    bg=ACCENT,
+                    activebackground=ACCENT_DARK,
+                    fg=WHITE
                 )
             )
 
-    def _show_summary(self, name, record):
+    def _show_summary(
+        self,
+        name,
+        record
+    ):
+
         self._set_conversation_text(
-            f"Conversation with {name}\n{record['display_date']}\n\n{record['summary']}"
+            f"Conversation with {name}\n"
+            f"{record['display_date']}\n\n"
+            f"{record['summary']}"
         )
-        self.refresh_last_conversation_button(name)
+
+        self.refresh_last_conversation_button(
+            name
+        )
 
     # ========================================================
     # CONVERSATION RETRIEVAL
     # ========================================================
 
-    def refresh_last_conversation_button(self, name):
-        """
-        Called whenever a person is (re)recognized, or a new conversation
-        is saved for them. Updates the "last conversation" label/button.
-        """
-        conversations = self.people.get(name, {}).get("conversations", [])
+    def refresh_last_conversation_button(
+        self,
+        name
+    ):
+
+        conversations = self.people.get(
+            name,
+            {}
+        ).get(
+            "conversations",
+            []
+        )
 
         if conversations:
+
             last = conversations[-1]
+
             self.last_conv_label.config(
-                text=f"Retrieve last conversation with {name}\n({last['display_date']})"
+                text=(
+                    f"Last conversation with {name}\n"
+                    f"{last['display_date']}"
+                ),
+                fg=TEXT
             )
+
             self.view_conv_btn.config(
                 state="normal",
-                command=lambda: self.load_last_conversation(name)
+                cursor="hand2",
+                command=lambda:
+                self.load_last_conversation(
+                    name
+                )
             )
-        else:
-            self.last_conv_label.config(text=f"No past conversations with {name} yet.")
-            self.view_conv_btn.config(state="disabled", command=lambda: None)
 
-    def load_last_conversation(self, name):
-        conversations = self.people.get(name, {}).get("conversations", [])
+        else:
+
+            self.last_conv_label.config(
+                text=(
+                    f"No past conversations with "
+                    f"{name} yet."
+                ),
+                fg=SECONDARY
+            )
+
+            self.view_conv_btn.config(
+                state="disabled",
+                cursor="arrow",
+                command=lambda: None
+            )
+
+    def load_last_conversation(
+        self,
+        name
+    ):
+
+        conversations = self.people.get(
+            name,
+            {}
+        ).get(
+            "conversations",
+            []
+        )
 
         if not conversations:
             return
@@ -1408,7 +2804,9 @@ class DementiaAssistantPro:
         last = conversations[-1]
 
         self._set_conversation_text(
-            f"Last conversation with {name}\n{last['display_date']}\n\n{last['summary']}"
+            f"Last conversation with {name}\n"
+            f"{last['display_date']}\n\n"
+            f"{last['summary']}"
         )
 
     # ========================================================
@@ -1417,13 +2815,22 @@ class DementiaAssistantPro:
 
     def on_closing(self):
 
-        print("Closing application...")
+        print(
+            "Closing application..."
+        )
 
         self.ai_running = False
 
-        if self.recording and self.speech_recorder:
+        if (
+            self.recording
+            and
+            self.speech_recorder
+        ):
+
             try:
+
                 self.speech_recorder.stop()
+
             except Exception:
                 pass
 
@@ -1442,5 +2849,9 @@ class DementiaAssistantPro:
 if __name__ == "__main__":
 
     root = tk.Tk()
-    app = DementiaAssistantPro(root)
+
+    app = DementiaAssistantPro(
+        root
+    )
+
     root.mainloop()

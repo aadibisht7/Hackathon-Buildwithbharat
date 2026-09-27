@@ -8,6 +8,7 @@ from deepface import DeepFace
 import pickle
 import os
 import time
+import datetime
 import threading
 
 from collections import defaultdict, deque
@@ -19,6 +20,9 @@ from voice_registration import register_from_voice
 from speech_recorder import SpeechRecorder
 from summarizer import summarize_text
 from conversation_manager import save_conversation_files
+
+# "Last Met" display formatting
+from last_met import format_last_met
 
 
 # ============================================================
@@ -46,6 +50,12 @@ REQUIRED_CONFIRMATIONS = 3
 MAX_EMBEDDINGS_PER_PERSON = 8
 
 TRACK_TIMEOUT = 1.5
+
+# How long (in seconds) a person must be OUT of frame before their next
+# appearance counts as a new "session" for Last Met purposes. Brief
+# tracking flickers (a fraction of a second to a few seconds) while they
+# sit in front of the camera should NOT count as a new visit.
+SESSION_GAP_SECONDS = 300  # 5 minutes
 
 
 # ============================================================
@@ -79,7 +89,7 @@ class DementiaAssistantPro:
 
         self.root = root
         self.root.title("ForgetMeNot")
-        self.root.geometry("1550x820")
+        self.root.geometry("1550x920")
         self.root.minsize(1200, 700)
         self.root.configure(bg=BG)
 
@@ -129,7 +139,15 @@ class DementiaAssistantPro:
 
         self.current_person = None
         self.current_people = []
-        self.previously_recognized = set()
+
+        # name -> formatted "Last Met" string (e.g. "10am, Today"),
+        # captured at the moment each person is newly recognized
+        self.last_met_display = {}
+
+        # name -> time.time() they were last part of an active,
+        # continuous session (used to tell a real new visit apart
+        # from a brief tracking flicker)
+        self.session_last_active = {}
 
         # ----------------------------------------------------
         # Conversation recording state
@@ -1316,6 +1334,10 @@ class DementiaAssistantPro:
                     ""
                 )
 
+                last_met_text = self.last_met_display.get(
+                    stable_name
+                )
+
                 if stable_name not in recognized_people:
                     recognized_people.append(
                         stable_name
@@ -1327,12 +1349,14 @@ class DementiaAssistantPro:
 
                 display_name = "Checking..."
                 relationship = ""
+                last_met_text = None
                 status = "Identifying"
 
             else:
 
                 display_name = "Unknown"
                 relationship = ""
+                last_met_text = None
                 status = "Unknown"
 
             # ------------------------------------------------
@@ -1409,7 +1433,11 @@ class DementiaAssistantPro:
             if relationship:
 
                 card_width = 230
-                card_height = 68
+
+                if last_met_text:
+                    card_height = 90
+                else:
+                    card_height = 68
 
             else:
 
@@ -1637,6 +1665,26 @@ class DementiaAssistantPro:
                 )
 
             # ------------------------------------------------
+            # Last Met
+            # ------------------------------------------------
+
+            if last_met_text:
+
+                cv2.putText(
+                    frame,
+                    f"Last Met: {last_met_text}",
+                    (
+                        text_x,
+                        top + 73
+                    ),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.52,
+                    (150, 150, 150),
+                    1,
+                    cv2.LINE_AA
+                )
+
+            # ------------------------------------------------
             # Small connector line
             # ------------------------------------------------
 
@@ -1693,6 +1741,26 @@ class DementiaAssistantPro:
 
     def on_person_recognized(self, name):
 
+        person = self.people.setdefault(
+            name,
+            {
+                "relationship": "",
+                "embeddings": [],
+                "conversations": [],
+                "last_seen": None
+            }
+        )
+
+        # Show the time they were seen *before* this visit, then
+        # advance last_seen to now for next time.
+        self.last_met_display[name] = format_last_met(
+            person.get("last_seen")
+        )
+
+        person["last_seen"] = datetime.datetime.now().isoformat()
+
+        self.save_database()
+
         self.refresh_last_conversation_button(
             name
         )
@@ -1747,23 +1815,32 @@ class DementiaAssistantPro:
             self.last_results
         )
 
+        now_ts = time.time()
+
         currently_recognized = set(
             self.current_people
         )
 
-        for name in (
-            currently_recognized
-            -
-            self.previously_recognized
-        ):
+        for name in currently_recognized:
 
-            self.on_person_recognized(
+            last_active = self.session_last_active.get(
                 name
             )
 
-        self.previously_recognized = (
-            currently_recognized
-        )
+            is_new_session = (
+                last_active is None
+                or
+                (now_ts - last_active) > SESSION_GAP_SECONDS
+            )
+
+            if is_new_session:
+                self.on_person_recognized(
+                    name
+                )
+
+            self.session_last_active[
+                name
+            ] = now_ts
 
         rgb = cv2.cvtColor(
             frame,
@@ -2131,7 +2208,8 @@ class DementiaAssistantPro:
                 "relationship": relationship,
                 "embeddings": embeddings,
                 "created": time.time(),
-                "conversations": []
+                "conversations": [],
+                "last_seen": None
             }
 
             self.save_database()
@@ -2622,7 +2700,8 @@ class DementiaAssistantPro:
                 {
                     "relationship": "",
                     "embeddings": [],
-                    "conversations": []
+                    "conversations": [],
+                    "last_seen": None
                 }
             )
 

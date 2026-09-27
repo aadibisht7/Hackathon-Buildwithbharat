@@ -52,10 +52,11 @@ MAX_EMBEDDINGS_PER_PERSON = 8
 TRACK_TIMEOUT = 1.5
 
 # How long (in seconds) a person must be OUT of frame before their next
-# appearance counts as a new "session" for Last Met purposes. Brief
-# tracking flickers (a fraction of a second to a few seconds) while they
-# sit in front of the camera should NOT count as a new visit.
+# appearance counts as a new "session" for Last Met purposes.
 SESSION_GAP_SECONDS = 300  # 5 minutes
+
+# Downscaled width for background AI detection (significantly speeds up inference)
+AI_INPUT_WIDTH = 640
 
 
 # ============================================================
@@ -119,13 +120,16 @@ class DementiaAssistantPro:
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
         # ----------------------------------------------------
-        # AI state
+        # AI & Tracking state
         # ----------------------------------------------------
 
         self.ai_running = True
         self.processing = False
         self.frame_count = 0
         self.last_results = []
+
+        # Real-time per-frame visual trackers (track_id -> cv2.Tracker)
+        self.fast_trackers = {}
 
         self.identity_history = defaultdict(
             lambda: deque(maxlen=REQUIRED_CONFIRMATIONS)
@@ -135,18 +139,16 @@ class DementiaAssistantPro:
         self.next_track_id = 0
 
         self.ui_positions = {}
-        self.ui_smoothing = 0.25
+        # Increased smoothing to eliminate sluggish trailing
+        self.ui_smoothing = 0.60
 
         self.current_person = None
         self.current_people = []
 
-        # name -> formatted "Last Met" string (e.g. "10am, Today"),
-        # captured at the moment each person is newly recognized
+        # name -> formatted "Last Met" string
         self.last_met_display = {}
 
-        # name -> time.time() they were last part of an active,
-        # continuous session (used to tell a real new visit apart
-        # from a brief tracking flicker)
+        # name -> time.time() of active continuous session
         self.session_last_active = {}
 
         # ----------------------------------------------------
@@ -188,6 +190,23 @@ class DementiaAssistantPro:
             "WM_DELETE_WINDOW",
             self.on_closing
         )
+
+    # ========================================================
+    # TRACKER FACTORY
+    # ========================================================
+
+    def _create_fast_tracker(self):
+        """Creates a lightweight OpenCV visual tracker across OpenCV versions."""
+        if hasattr(cv2, "TrackerKCF_create"):
+            return cv2.TrackerKCF_create()
+        elif hasattr(cv2, "TrackerMIL_create"):
+            return cv2.TrackerMIL_create()
+        elif hasattr(cv2, "legacy"):
+            if hasattr(cv2.legacy, "TrackerMOSSE_create"):
+                return cv2.legacy.TrackerMOSSE_create()
+            elif hasattr(cv2.legacy, "TrackerKCF_create"):
+                return cv2.legacy.TrackerKCF_create()
+        return None
 
     # ========================================================
     # DATABASE
@@ -331,10 +350,6 @@ class DementiaAssistantPro:
 
     def create_ui(self):
 
-        # ----------------------------------------------------
-        # Root layout
-        # ----------------------------------------------------
-
         main_frame = tk.Frame(
             self.root,
             bg=BG
@@ -361,10 +376,6 @@ class DementiaAssistantPro:
             padx=(24, 12),
             pady=20
         )
-
-        # ----------------------------------------------------
-        # Top navigation/header
-        # ----------------------------------------------------
 
         header = tk.Frame(
             left_frame,
@@ -406,10 +417,6 @@ class DementiaAssistantPro:
             pady=(2, 0)
         )
 
-        # ----------------------------------------------------
-        # AI status pill
-        # ----------------------------------------------------
-
         status_container = tk.Frame(
             header,
             bg=WHITE,
@@ -450,10 +457,6 @@ class DementiaAssistantPro:
             pady=7
         )
 
-        # ----------------------------------------------------
-        # Camera card
-        # ----------------------------------------------------
-
         camera_outer = tk.Frame(
             left_frame,
             bg=WHITE,
@@ -480,10 +483,6 @@ class DementiaAssistantPro:
             pady=1
         )
 
-        # ----------------------------------------------------
-        # Registration panel
-        # ----------------------------------------------------
-
         registration_card = tk.Frame(
             left_frame,
             bg=WHITE,
@@ -507,8 +506,6 @@ class DementiaAssistantPro:
             pady=15
         )
 
-        # Section heading
-
         reg_title = tk.Label(
             registration_inner,
             text="Register someone",
@@ -524,8 +521,6 @@ class DementiaAssistantPro:
             sticky="w",
             pady=(0, 10)
         )
-
-        # Name
 
         tk.Label(
             registration_inner,
@@ -551,8 +546,6 @@ class DementiaAssistantPro:
             padx=(0, 10)
         )
 
-        # Relationship
-
         tk.Label(
             registration_inner,
             text="Relationship",
@@ -576,8 +569,6 @@ class DementiaAssistantPro:
             sticky="ew",
             padx=(0, 10)
         )
-
-        # Buttons
 
         self.register_btn = self.create_button(
             registration_inner,
@@ -605,15 +596,8 @@ class DementiaAssistantPro:
             padx=(5, 0)
         )
 
-        registration_inner.grid_columnconfigure(
-            0,
-            weight=1
-        )
-
-        registration_inner.grid_columnconfigure(
-            1,
-            weight=1
-        )
+        registration_inner.grid_columnconfigure(0, weight=1)
+        registration_inner.grid_columnconfigure(1, weight=1)
 
         # ====================================================
         # RIGHT SIDE
@@ -635,10 +619,6 @@ class DementiaAssistantPro:
         )
 
         right_frame.pack_propagate(False)
-
-        # ----------------------------------------------------
-        # Conversation header
-        # ----------------------------------------------------
 
         conversation_header = tk.Frame(
             right_frame,
@@ -671,10 +651,6 @@ class DementiaAssistantPro:
             anchor="w",
             pady=(3, 0)
         )
-
-        # ----------------------------------------------------
-        # Recording button
-        # ----------------------------------------------------
 
         recording_card = tk.Frame(
             right_frame,
@@ -731,10 +707,6 @@ class DementiaAssistantPro:
         self.record_btn.pack(
             fill="x"
         )
-
-        # ----------------------------------------------------
-        # Last conversation card
-        # ----------------------------------------------------
 
         retrieval_card = tk.Frame(
             right_frame,
@@ -800,10 +772,6 @@ class DementiaAssistantPro:
         self.view_conv_btn.pack(
             fill="x"
         )
-
-        # ----------------------------------------------------
-        # Transcript area
-        # ----------------------------------------------------
 
         transcript_header = tk.Frame(
             right_frame,
@@ -886,42 +854,17 @@ class DementiaAssistantPro:
 
     def _set_conversation_text(self, text):
 
-        self.conversation_text.config(
-            state="normal"
-        )
-
-        self.conversation_text.delete(
-            "1.0",
-            tk.END
-        )
-
-        self.conversation_text.insert(
-            tk.END,
-            text
-        )
-
-        self.conversation_text.config(
-            state="disabled"
-        )
+        self.conversation_text.config(state="normal")
+        self.conversation_text.delete("1.0", tk.END)
+        self.conversation_text.insert(tk.END, text)
+        self.conversation_text.config(state="disabled")
 
     def _append_conversation_text(self, text):
 
-        self.conversation_text.config(
-            state="normal"
-        )
-
-        self.conversation_text.insert(
-            tk.END,
-            text
-        )
-
-        self.conversation_text.see(
-            tk.END
-        )
-
-        self.conversation_text.config(
-            state="disabled"
-        )
+        self.conversation_text.config(state="normal")
+        self.conversation_text.insert(tk.END, text)
+        self.conversation_text.see(tk.END)
+        self.conversation_text.config(state="disabled")
 
     # ========================================================
     # AI MODEL WARMUP
@@ -930,13 +873,9 @@ class DementiaAssistantPro:
     def warmup_model(self):
 
         try:
-
             print("Loading DeepFace model...")
 
-            dummy = np.zeros(
-                (224, 224, 3),
-                dtype=np.uint8
-            )
+            dummy = np.zeros((224, 224, 3), dtype=np.uint8)
 
             DeepFace.represent(
                 img_path=dummy,
@@ -955,9 +894,7 @@ class DementiaAssistantPro:
             )
 
         except Exception as e:
-
             print("Model warmup error:", e)
-
             self.root.after(
                 0,
                 lambda err=e: self.status_label.config(
@@ -971,14 +908,8 @@ class DementiaAssistantPro:
 
     def normalize_embedding(self, embedding):
 
-        embedding = np.array(
-            embedding,
-            dtype=np.float32
-        )
-
-        norm = np.linalg.norm(
-            embedding
-        )
+        embedding = np.array(embedding, dtype=np.float32)
+        norm = np.linalg.norm(embedding)
 
         if norm == 0:
             return embedding
@@ -989,30 +920,13 @@ class DementiaAssistantPro:
     # COSINE DISTANCE
     # ========================================================
 
-    def cosine_distance(
-        self,
-        embedding1,
-        embedding2
-    ):
+    def cosine_distance(self, embedding1, embedding2):
 
-        embedding1 = self.normalize_embedding(
-            embedding1
-        )
+        embedding1 = self.normalize_embedding(embedding1)
+        embedding2 = self.normalize_embedding(embedding2)
 
-        embedding2 = self.normalize_embedding(
-            embedding2
-        )
-
-        similarity = np.dot(
-            embedding1,
-            embedding2
-        )
-
-        similarity = np.clip(
-            similarity,
-            -1,
-            1
-        )
+        similarity = np.dot(embedding1, embedding2)
+        similarity = np.clip(similarity, -1, 1)
 
         return 1 - similarity
 
@@ -1029,27 +943,16 @@ class DementiaAssistantPro:
         best_distance = float("inf")
 
         for name, data in self.people.items():
-
-            embeddings = data.get(
-                "embeddings",
-                []
-            )
+            embeddings = data.get("embeddings", [])
 
             for stored_embedding in embeddings:
-
-                distance = self.cosine_distance(
-                    embedding,
-                    stored_embedding
-                )
+                distance = self.cosine_distance(embedding, stored_embedding)
 
                 if distance < best_distance:
                     best_distance = distance
                     best_name = name
 
-        if (
-            best_name is not None
-            and best_distance <= MATCH_THRESHOLD
-        ):
+        if best_name is not None and best_distance <= MATCH_THRESHOLD:
             return best_name, best_distance
 
         return None, best_distance
@@ -1065,24 +968,19 @@ class DementiaAssistantPro:
 
         h, w = face.shape[:2]
 
-        if w < MIN_FACE_SIZE:
-            return False
-
-        if h < MIN_FACE_SIZE:
+        if w < MIN_FACE_SIZE or h < MIN_FACE_SIZE:
             return False
 
         return True
 
     # ========================================================
-    # PROCESS FRAME
+    # PROCESS FRAME (BACKGROUND AI)
     # ========================================================
 
     def process_frame(self, frame):
 
         results = []
-
         now = time.time()
-
         used_track_ids = set()
 
         stale_ids = [
@@ -1092,17 +990,16 @@ class DementiaAssistantPro:
         ]
 
         for tid in stale_ids:
-
-            del self.tracked_faces[tid]
-
+            if tid in self.tracked_faces:
+                del self.tracked_faces[tid]
             if tid in self.identity_history:
                 del self.identity_history[tid]
-
             if tid in self.ui_positions:
                 del self.ui_positions[tid]
+            if tid in self.fast_trackers:
+                del self.fast_trackers[tid]
 
         try:
-
             faces = DeepFace.extract_faces(
                 img_path=frame,
                 detector_backend=DETECTOR_BACKEND,
@@ -1111,33 +1008,17 @@ class DementiaAssistantPro:
             )
 
             for face_data in faces:
-
                 face_image = face_data.get("face")
-
-                facial_area = face_data.get(
-                    "facial_area",
-                    {}
-                )
-
-                confidence = face_data.get(
-                    "confidence",
-                    0
-                )
+                facial_area = face_data.get("facial_area", {})
+                confidence = face_data.get("confidence", 0)
 
                 if face_image is None:
                     continue
 
                 if face_image.max() <= 1.0:
-
-                    face_image = (
-                        face_image * 255
-                    ).astype(np.uint8)
-
+                    face_image = (face_image * 255).astype(np.uint8)
                 else:
-
-                    face_image = (
-                        face_image.astype(np.uint8)
-                    )
+                    face_image = face_image.astype(np.uint8)
 
                 if confidence < FACE_DETECTION_CONFIDENCE:
                     continue
@@ -1156,10 +1037,7 @@ class DementiaAssistantPro:
                     continue
 
                 embedding = representation[0]["embedding"]
-
-                name, distance = self.find_best_match(
-                    embedding
-                )
+                name, distance = self.find_best_match(embedding)
 
                 x = facial_area.get("x", 0)
                 y = facial_area.get("y", 0)
@@ -1169,12 +1047,7 @@ class DementiaAssistantPro:
                 cx = x + w // 2
                 cy = y + h // 2
 
-                track_id = self._match_track_id(
-                    cx,
-                    cy,
-                    used_track_ids
-                )
-
+                track_id = self._match_track_id(cx, cy, used_track_ids)
                 used_track_ids.add(track_id)
 
                 self.tracked_faces[track_id] = {
@@ -1182,10 +1055,7 @@ class DementiaAssistantPro:
                     "last_seen": now
                 }
 
-                stable_name = self.stabilize_identity(
-                    track_id,
-                    name
-                )
+                stable_name = self.stabilize_identity(track_id, name)
 
                 results.append({
                     "name": name,
@@ -1199,11 +1069,7 @@ class DementiaAssistantPro:
                 })
 
         except Exception as e:
-
-            print(
-                "AI processing error:",
-                e
-            )
+            print("AI processing error:", e)
 
         return results
 
@@ -1211,37 +1077,23 @@ class DementiaAssistantPro:
     # TRACKING
     # ========================================================
 
-    def _match_track_id(
-        self,
-        cx,
-        cy,
-        used_track_ids,
-        max_distance=120
-    ):
+    def _match_track_id(self, cx, cy, used_track_ids, max_distance=140):
 
         best_id = None
         best_dist = max_distance
 
         for track_id, info in self.tracked_faces.items():
-
             if track_id in used_track_ids:
                 continue
 
             px, py = info["pos"]
-
-            dist = (
-                (cx - px) ** 2
-                +
-                (cy - py) ** 2
-            ) ** 0.5
+            dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
 
             if dist < best_dist:
-
                 best_dist = dist
                 best_id = track_id
 
         if best_id is None:
-
             best_id = self.next_track_id
             self.next_track_id += 1
 
@@ -1251,178 +1103,88 @@ class DementiaAssistantPro:
     # IDENTITY STABILIZATION
     # ========================================================
 
-    def stabilize_identity(
-        self,
-        track_id,
-        name
-    ):
+    def stabilize_identity(self, track_id, name):
 
         if name is None:
             return None
 
-        history = self.identity_history[
-            track_id
-        ]
-
+        history = self.identity_history[track_id]
         history.append(name)
 
         if len(history) < REQUIRED_CONFIRMATIONS:
             return None
 
         counts = {}
-
         for item in history:
+            counts[item] = counts.get(item, 0) + 1
 
-            counts[item] = (
-                counts.get(item, 0) + 1
-            )
+        best_name = max(counts, key=counts.get)
 
-        best_name = max(
-            counts,
-            key=counts.get
-        )
-
-        if (
-            counts[best_name]
-            >= REQUIRED_CONFIRMATIONS
-        ):
+        if counts[best_name] >= REQUIRED_CONFIRMATIONS:
             return best_name
 
         return None
 
     # ========================================================
-    # DRAW RESULTS
+    # DRAW RESULTS (OPTIMIZED ROI BLENDING)
     # ========================================================
 
-    def draw_results(
-        self,
-        frame,
-        results
-    ):
+    def draw_results(self, frame, results):
 
         recognized_people = []
+        h_frame, w_frame = frame.shape[:2]
 
         for result in results:
-
             x = result["x"]
             y = result["y"]
             w = result["w"]
             h = result["h"]
-
-            track_id = result.get(
-                "track_id"
-            )
-
+            track_id = result.get("track_id")
             name = result["name"]
-
-            stable_name = result.get(
-                "stable_name"
-            )
+            stable_name = result.get("stable_name")
 
             # ------------------------------------------------
             # Determine displayed information
             # ------------------------------------------------
 
             if stable_name:
-
                 display_name = stable_name
-
-                relationship = self.people[
-                    stable_name
-                ].get(
-                    "relationship",
-                    ""
-                )
-
-                last_met_text = self.last_met_display.get(
-                    stable_name
-                )
+                relationship = self.people[stable_name].get("relationship", "")
+                last_met_text = self.last_met_display.get(stable_name)
 
                 if stable_name not in recognized_people:
-                    recognized_people.append(
-                        stable_name
-                    )
+                    recognized_people.append(stable_name)
 
                 status = "Recognized"
 
             elif name:
-
                 display_name = "Checking..."
                 relationship = ""
                 last_met_text = None
                 status = "Identifying"
 
             else:
-
                 display_name = "Unknown"
                 relationship = ""
                 last_met_text = None
                 status = "Unknown"
 
             # ------------------------------------------------
-            # Face center
+            # Face center & smooth UI positioning
             # ------------------------------------------------
 
             target_x = x + w // 2
-
             target_y = y - 20
 
-            # ------------------------------------------------
-            # Smooth movement
-            # ------------------------------------------------
-
             if track_id not in self.ui_positions:
-
-                self.ui_positions[
-                    track_id
-                ] = (
-                    target_x,
-                    target_y
-                )
-
+                self.ui_positions[track_id] = (target_x, target_y)
             else:
+                old_x, old_y = self.ui_positions[track_id]
+                new_x = old_x + (target_x - old_x) * self.ui_smoothing
+                new_y = old_y + (target_y - old_y) * self.ui_smoothing
+                self.ui_positions[track_id] = (new_x, new_y)
 
-                old_x, old_y = (
-                    self.ui_positions[
-                        track_id
-                    ]
-                )
-
-                new_x = (
-                    old_x
-                    +
-                    (
-                        target_x
-                        -
-                        old_x
-                    )
-                    *
-                    self.ui_smoothing
-                )
-
-                new_y = (
-                    old_y
-                    +
-                    (
-                        target_y
-                        -
-                        old_y
-                    )
-                    *
-                    self.ui_smoothing
-                )
-
-                self.ui_positions[
-                    track_id
-                ] = (
-                    new_x,
-                    new_y
-                )
-
-            card_x, card_y = self.ui_positions[
-                track_id
-            ]
-
+            card_x, card_y = self.ui_positions[track_id]
             card_x = int(card_x)
             card_y = int(card_y)
 
@@ -1431,201 +1193,70 @@ class DementiaAssistantPro:
             # ------------------------------------------------
 
             if relationship:
-
                 card_width = 230
-
-                if last_met_text:
-                    card_height = 90
-                else:
-                    card_height = 68
-
+                card_height = 90 if last_met_text else 68
             else:
-
                 card_width = 180
                 card_height = 58
 
             # ------------------------------------------------
-            # Keep card inside screen
+            # Keep card inside screen bounds
             # ------------------------------------------------
 
-            card_x = max(
-                card_width // 2 + 10,
-                min(
-                    card_x,
-                    frame.shape[1]
-                    -
-                    card_width // 2
-                    -
-                    10
-                )
-            )
+            card_x = max(card_width // 2 + 10, min(card_x, w_frame - card_width // 2 - 10))
+            card_y = max(card_height + 10, card_y)
 
-            card_y = max(
-                card_height + 10,
-                card_y
-            )
-
-            left = int(
-                card_x
-                -
-                card_width // 2
-            )
-
-            top = int(
-                card_y
-                -
-                card_height
-            )
-
-            right = int(
-                card_x
-                +
-                card_width // 2
-            )
-
+            left = int(card_x - card_width // 2)
+            top = int(card_y - card_height)
+            right = int(card_x + card_width // 2)
             bottom = int(card_y)
 
             # ------------------------------------------------
-            # Create translucent overlay
+            # FAST ROI-ONLY TRANSLUCENT CARD BLENDING
+            # (Replaces full-frame copying for instant rendering)
             # ------------------------------------------------
 
-            overlay = frame.copy()
+            x1 = max(0, left)
+            y1 = max(0, top)
+            x2 = min(w_frame, right)
+            y2 = min(h_frame, bottom)
+
+            if x2 > x1 and y2 > y1:
+                roi = frame[y1:y2, x1:x2]
+                roi_overlay = roi.copy()
+
+                rx = left - x1
+                ry = top - y1
+                radius = 18
+
+                # Draw rounded rectangle in the small ROI
+                cv2.rectangle(roi_overlay, (rx + radius, ry), (rx + card_width - radius, ry + card_height), (25, 25, 25), -1)
+                cv2.rectangle(roi_overlay, (rx, ry + radius), (rx + card_width, ry + card_height - radius), (25, 25, 25), -1)
+                cv2.circle(roi_overlay, (rx + radius, ry + radius), radius, (25, 25, 25), -1)
+                cv2.circle(roi_overlay, (rx + card_width - radius, ry + radius), radius, (25, 25, 25), -1)
+                cv2.circle(roi_overlay, (rx + radius, ry + card_height - radius), radius, (25, 25, 25), -1)
+                cv2.circle(roi_overlay, (rx + card_width - radius, ry + card_height - radius), radius, (25, 25, 25), -1)
+
+                cv2.addWeighted(roi_overlay, 0.82, roi, 0.18, 0, roi)
 
             # ------------------------------------------------
-            # Rounded effect
-            # ------------------------------------------------
-
-            radius = 18
-
-            cv2.rectangle(
-                overlay,
-                (
-                    left + radius,
-                    top
-                ),
-                (
-                    right - radius,
-                    bottom
-                ),
-                (25, 25, 25),
-                -1
-            )
-
-            cv2.rectangle(
-                overlay,
-                (
-                    left,
-                    top + radius
-                ),
-                (
-                    right,
-                    bottom - radius
-                ),
-                (25, 25, 25),
-                -1
-            )
-
-            cv2.circle(
-                overlay,
-                (
-                    left + radius,
-                    top + radius
-                ),
-                radius,
-                (25, 25, 25),
-                -1
-            )
-
-            cv2.circle(
-                overlay,
-                (
-                    right - radius,
-                    top + radius
-                ),
-                radius,
-                (25, 25, 25),
-                -1
-            )
-
-            cv2.circle(
-                overlay,
-                (
-                    left + radius,
-                    bottom - radius
-                ),
-                radius,
-                (25, 25, 25),
-                -1
-            )
-
-            cv2.circle(
-                overlay,
-                (
-                    right - radius,
-                    bottom - radius
-                ),
-                radius,
-                (25, 25, 25),
-                -1
-            )
-
-            # ------------------------------------------------
-            # Transparency
-            # ------------------------------------------------
-
-            cv2.addWeighted(
-                overlay,
-                0.82,
-                frame,
-                0.18,
-                0,
-                frame
-            )
-
-            # ------------------------------------------------
-            # Small status indicator
+            # Status indicator dot
             # ------------------------------------------------
 
             dot_x = left + 22
             dot_y = top + 23
 
             if status == "Recognized":
-
-                dot_color = (
-                    80,
-                    220,
-                    120
-                )
-
+                dot_color = (80, 220, 120)
             elif status == "Identifying":
-
-                dot_color = (
-                    230,
-                    190,
-                    70
-                )
-
+                dot_color = (230, 190, 70)
             else:
+                dot_color = (150, 150, 150)
 
-                dot_color = (
-                    150,
-                    150,
-                    150
-                )
-
-            cv2.circle(
-                frame,
-                (
-                    dot_x,
-                    dot_y
-                ),
-                5,
-                dot_color,
-                -1
-            )
+            cv2.circle(frame, (dot_x, dot_y), 5, dot_color, -1)
 
             # ------------------------------------------------
-            # Name
+            # Text & Details
             # ------------------------------------------------
 
             text_x = left + 38
@@ -1633,10 +1264,7 @@ class DementiaAssistantPro:
             cv2.putText(
                 frame,
                 display_name,
-                (
-                    text_x,
-                    top + 29
-                ),
+                (text_x, top + 29),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
                 (245, 245, 245),
@@ -1644,19 +1272,11 @@ class DementiaAssistantPro:
                 cv2.LINE_AA
             )
 
-            # ------------------------------------------------
-            # Relationship
-            # ------------------------------------------------
-
             if relationship:
-
                 cv2.putText(
                     frame,
                     relationship,
-                    (
-                        text_x,
-                        top + 51
-                    ),
+                    (text_x, top + 51),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.64,
                     (175, 175, 175),
@@ -1664,19 +1284,11 @@ class DementiaAssistantPro:
                     cv2.LINE_AA
                 )
 
-            # ------------------------------------------------
-            # Last Met
-            # ------------------------------------------------
-
             if last_met_text:
-
                 cv2.putText(
                     frame,
                     f"Last Met: {last_met_text}",
-                    (
-                        text_x,
-                        top + 73
-                    ),
+                    (text_x, top + 73),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.52,
                     (150, 150, 150),
@@ -1684,54 +1296,24 @@ class DementiaAssistantPro:
                     cv2.LINE_AA
                 )
 
-            # ------------------------------------------------
-            # Small connector line
-            # ------------------------------------------------
-
-            line_start = (
-                card_x,
-                bottom
-            )
-
-            line_end = (
-                x + w // 2,
-                y
-            )
-
+            # Connector line
             cv2.line(
                 frame,
-                line_start,
-                line_end,
+                (card_x, bottom),
+                (x + w // 2, y),
                 (100, 100, 100),
                 1,
                 cv2.LINE_AA
             )
 
-        # ----------------------------------------------------
-        # Save recognized people
-        # ----------------------------------------------------
-
         self.current_people = recognized_people
-
         if recognized_people:
+            self.current_person = recognized_people[-1]
 
-            self.current_person = (
-                recognized_people[-1]
-            )
-
-        # ----------------------------------------------------
-        # Remove old UI tracks
-        # ----------------------------------------------------
-
-        for track_id in list(
-            self.ui_positions.keys()
-        ):
-
+        # Clean stale UI tracks
+        for track_id in list(self.ui_positions.keys()):
             if track_id not in self.tracked_faces:
-
-                del self.ui_positions[
-                    track_id
-                ]
+                del self.ui_positions[track_id]
 
         return frame
 
@@ -1751,19 +1333,11 @@ class DementiaAssistantPro:
             }
         )
 
-        # Show the time they were seen *before* this visit, then
-        # advance last_seen to now for next time.
-        self.last_met_display[name] = format_last_met(
-            person.get("last_seen")
-        )
-
+        self.last_met_display[name] = format_last_met(person.get("last_seen"))
         person["last_seen"] = datetime.datetime.now().isoformat()
 
         self.save_database()
-
-        self.refresh_last_conversation_button(
-            name
-        )
+        self.refresh_last_conversation_button(name)
 
     # ========================================================
     # CAMERA LOOP
@@ -1777,189 +1351,156 @@ class DementiaAssistantPro:
         ret, frame = self.cap.read()
 
         if not ret:
-
-            self.root.after(
-                30,
-                self.update_video
-            )
-
+            self.root.after(30, self.update_video)
             return
 
-        frame = cv2.flip(
-            frame,
-            1
-        )
-
+        frame = cv2.flip(frame, 1)
         self.frame_count += 1
 
-        if (
-            self.frame_count
-            %
-            AI_FRAME_SKIP
-            == 0
-            and not self.processing
-        ):
+        # ----------------------------------------------------
+        # 1. Real-time visual tracking update (every frame)
+        # ----------------------------------------------------
+        for res in self.last_results:
+            tid = res.get("track_id")
+            if tid in self.fast_trackers:
+                success, bbox = self.fast_trackers[tid].update(frame)
+                if success:
+                    res["x"] = int(bbox[0])
+                    res["y"] = int(bbox[1])
+                    res["w"] = int(bbox[2])
+                    res["h"] = int(bbox[3])
 
+        # ----------------------------------------------------
+        # 2. Trigger periodic AI recognition on downscaled frame
+        # ----------------------------------------------------
+        if self.frame_count % AI_FRAME_SKIP == 0 and not self.processing:
             self.processing = True
 
-            ai_frame = frame.copy()
+            orig_h, orig_w = frame.shape[:2]
+            target_w = AI_INPUT_WIDTH
+            target_h = int(orig_h * (target_w / orig_w))
+
+            # Downscale frame for ultra-fast face detection & ArcFace extraction
+            ai_frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            scale_x = orig_w / target_w
+            scale_y = orig_h / target_h
 
             threading.Thread(
                 target=self.run_ai,
-                args=(ai_frame,),
+                args=(ai_frame, scale_x, scale_y, frame.copy()),
                 daemon=True
             ).start()
 
-        frame = self.draw_results(
-            frame,
-            self.last_results
-        )
+        # ----------------------------------------------------
+        # 3. Draw smoothed results onto current frame
+        # ----------------------------------------------------
+        frame = self.draw_results(frame, self.last_results)
 
         now_ts = time.time()
-
-        currently_recognized = set(
-            self.current_people
-        )
-
-        for name in currently_recognized:
-
-            last_active = self.session_last_active.get(
-                name
-            )
-
+        for name in set(self.current_people):
+            last_active = self.session_last_active.get(name)
             is_new_session = (
                 last_active is None
-                or
-                (now_ts - last_active) > SESSION_GAP_SECONDS
+                or (now_ts - last_active) > SESSION_GAP_SECONDS
             )
 
             if is_new_session:
-                self.on_person_recognized(
-                    name
-                )
+                self.on_person_recognized(name)
 
-            self.session_last_active[
-                name
-            ] = now_ts
+            self.session_last_active[name] = now_ts
 
-        rgb = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2RGB
-        )
+        # ----------------------------------------------------
+        # 4. Render to Tkinter
+        # ----------------------------------------------------
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(rgb)
+        image = image.resize((950, 620))
+        photo = ImageTk.PhotoImage(image=image)
 
-        image = Image.fromarray(
-            rgb
-        )
-
-        image = image.resize(
-            (950, 620)
-        )
-
-        photo = ImageTk.PhotoImage(
-            image=image
-        )
-
-        self.video_label.configure(
-            image=photo
-        )
-
+        self.video_label.configure(image=photo)
         self.video_label.image = photo
 
-        self.root.after(
-            15,
-            self.update_video
-        )
+        self.root.after(15, self.update_video)
 
     # ========================================================
     # BACKGROUND AI
     # ========================================================
 
-    def run_ai(self, frame):
+    def run_ai(self, ai_frame, scale_x, scale_y, orig_frame):
 
         try:
+            results = self.process_frame(ai_frame)
 
-            results = self.process_frame(
-                frame
-            )
+            # Scale coordinates back up to original frame dimensions
+            for r in results:
+                r["x"] = int(r["x"] * scale_x)
+                r["y"] = int(r["y"] * scale_y)
+                r["w"] = int(r["w"] * scale_x)
+                r["h"] = int(r["h"] * scale_y)
 
-            self.last_results = results
+            # Apply results and update visual trackers on the main thread safely
+            self.root.after(0, lambda res=results, f=orig_frame: self._apply_ai_results(res, f))
 
             recognized = None
-
             for result in results:
-
                 if result["name"]:
-
                     recognized = result["name"]
                     break
 
             if recognized:
-
-                relationship = self.people[
-                    recognized
-                ].get(
-                    "relationship",
-                    ""
-                )
-
+                relationship = self.people[recognized].get("relationship", "")
                 self.root.after(
                     0,
-                    lambda n=recognized,
-                    r=relationship:
-                    self.status_label.config(
+                    lambda n=recognized, r=relationship: self.status_label.config(
                         text=f"Detected: {n} ({r})"
                     )
                 )
-
-                self.root.after(
-                    0,
-                    lambda: self.status_dot.config(
-                        fg=SUCCESS
-                    )
-                )
+                self.root.after(0, lambda: self.status_dot.config(fg=SUCCESS))
 
             elif results:
-
                 self.root.after(
                     0,
                     lambda: self.status_label.config(
                         text="Face detected — identifying..."
                     )
                 )
-
-                self.root.after(
-                    0,
-                    lambda: self.status_dot.config(
-                        fg=WARNING
-                    )
-                )
+                self.root.after(0, lambda: self.status_dot.config(fg=WARNING))
 
             else:
-
                 self.root.after(
                     0,
                     lambda: self.status_label.config(
                         text="AI Ready — Looking for faces..."
                     )
                 )
-
-                self.root.after(
-                    0,
-                    lambda: self.status_dot.config(
-                        fg=SUCCESS
-                    )
-                )
+                self.root.after(0, lambda: self.status_dot.config(fg=SUCCESS))
 
         except Exception as e:
-
-            print(
-                "Background AI error:",
-                e
-            )
+            print("Background AI error:", e)
 
         finally:
-
             self.processing = False
+
+    def _apply_ai_results(self, results, frame):
+        """Initializes/re-anchors visual trackers with fresh ground truth coordinates."""
+        h_f, w_f = frame.shape[:2]
+
+        for r in results:
+            tid = r["track_id"]
+            tracker = self._create_fast_tracker()
+            if tracker is not None:
+                bx = max(0, r["x"])
+                by = max(0, r["y"])
+                bw = min(w_f - bx, r["w"])
+                bh = min(h_f - by, r["h"])
+                if bw > 20 and bh > 20:
+                    try:
+                        tracker.init(frame, (bx, by, bw, bh))
+                        self.fast_trackers[tid] = tracker
+                    except Exception:
+                        pass
+
+        self.last_results = results
 
     # ========================================================
     # NORMAL REGISTRATION
@@ -1968,49 +1509,23 @@ class DementiaAssistantPro:
     def register_person(self):
 
         name = self.name_entry.get().strip()
-
-        relationship = (
-            self.relationship_entry
-            .get()
-            .strip()
-        )
+        relationship = self.relationship_entry.get().strip()
 
         if not name:
-
-            messagebox.showwarning(
-                "Missing Name",
-                "Please enter the person's name."
-            )
-
+            messagebox.showwarning("Missing Name", "Please enter the person's name.")
             return
 
         if not relationship:
-
-            messagebox.showwarning(
-                "Missing Relationship",
-                "Please enter the relationship."
-            )
-
+            messagebox.showwarning("Missing Relationship", "Please enter the relationship.")
             return
 
-        self.status_label.config(
-            text=f"Look at the camera to register {name}..."
-        )
-
-        self.register_btn.config(
-            state="disabled"
-        )
-
-        self.register_voice_btn.config(
-            state="disabled"
-        )
+        self.status_label.config(text=f"Look at the camera to register {name}...")
+        self.register_btn.config(state="disabled")
+        self.register_voice_btn.config(state="disabled")
 
         threading.Thread(
             target=self.capture_registration,
-            args=(
-                name,
-                relationship
-            ),
+            args=(name, relationship),
             daemon=True
         ).start()
 
@@ -2018,48 +1533,24 @@ class DementiaAssistantPro:
     # CAPTURE REGISTRATION
     # ========================================================
 
-    def capture_registration(
-        self,
-        name,
-        relationship
-    ):
+    def capture_registration(self, name, relationship):
 
         embeddings = []
-
-        print(
-            f"Starting registration for {name}"
-        )
-
+        print(f"Starting registration for {name}")
         start_time = time.time()
 
         while len(embeddings) < MAX_EMBEDDINGS_PER_PERSON:
-
-            if (
-                time.time()
-                -
-                start_time
-                >
-                30
-            ):
-
-                print(
-                    "Registration timeout."
-                )
-
+            if time.time() - start_time > 30:
+                print("Registration timeout.")
                 break
 
             ret, frame = self.cap.read()
-
             if not ret:
                 continue
 
-            frame = cv2.flip(
-                frame,
-                1
-            )
+            frame = cv2.flip(frame, 1)
 
             try:
-
                 faces = DeepFace.extract_faces(
                     img_path=frame,
                     detector_backend=DETECTOR_BACKEND,
@@ -2068,53 +1559,23 @@ class DementiaAssistantPro:
                 )
 
                 if len(faces) == 0:
-
-                    self.root.after(
-                        0,
-                        lambda:
-                        self.status_label.config(
-                            text="No face detected..."
-                        )
-                    )
-
+                    self.root.after(0, lambda: self.status_label.config(text="No face detected..."))
                     time.sleep(0.2)
-
                     continue
 
                 face_data = faces[0]
+                face_image = face_data.get("face")
+                confidence = face_data.get("confidence", 0)
 
-                face_image = face_data.get(
-                    "face"
-                )
-
-                confidence = face_data.get(
-                    "confidence",
-                    0
-                )
-
-                if face_image is None:
-                    continue
-
-                if confidence < FACE_DETECTION_CONFIDENCE:
+                if face_image is None or confidence < FACE_DETECTION_CONFIDENCE:
                     continue
 
                 if face_image.max() <= 1.0:
-
-                    face_image = (
-                        face_image * 255
-                    ).astype(np.uint8)
-
+                    face_image = (face_image * 255).astype(np.uint8)
                 else:
+                    face_image = face_image.astype(np.uint8)
 
-                    face_image = (
-                        face_image.astype(
-                            np.uint8
-                        )
-                    )
-
-                if not self.good_face(
-                    face_image
-                ):
+                if not self.good_face(face_image):
                     continue
 
                 representation = DeepFace.represent(
@@ -2127,83 +1588,41 @@ class DementiaAssistantPro:
                 if not representation:
                     continue
 
-                embedding = representation[0][
-                    "embedding"
-                ]
+                embedding = self.normalize_embedding(representation[0]["embedding"])
 
-                embedding = (
-                    self.normalize_embedding(
-                        embedding
-                    )
+                duplicate = any(
+                    self.cosine_distance(embedding, old_emb) < 0.05
+                    for old_emb in embeddings
                 )
-
-                duplicate = False
-
-                for old_embedding in embeddings:
-
-                    distance = self.cosine_distance(
-                        embedding,
-                        old_embedding
-                    )
-
-                    if distance < 0.05:
-
-                        duplicate = True
-                        break
 
                 if duplicate:
                     continue
 
-                embeddings.append(
-                    embedding
-                )
-
-                count = len(
-                    embeddings
-                )
+                embeddings.append(embedding)
+                count = len(embeddings)
 
                 self.root.after(
                     0,
-                    lambda c=count:
-                    self.status_label.config(
+                    lambda c=count: self.status_label.config(
                         text=f"Capturing face {c}/{MAX_EMBEDDINGS_PER_PERSON}..."
                     )
                 )
-
-                print(
-                    f"Captured embedding {count}/{MAX_EMBEDDINGS_PER_PERSON}"
-                )
-
+                print(f"Captured embedding {count}/{MAX_EMBEDDINGS_PER_PERSON}")
                 time.sleep(0.5)
 
             except Exception as e:
-
-                print(
-                    "Registration AI error:",
-                    e
-                )
+                print("Registration AI error:", e)
 
         if len(embeddings) < REQUIRED_CONFIRMATIONS:
-
             self.root.after(
                 0,
-                lambda:
-                messagebox.showwarning(
+                lambda: messagebox.showwarning(
                     "Registration Failed",
                     "Could not capture enough good face samples."
                 )
             )
-
-            self.root.after(
-                0,
-                lambda:
-                self.status_label.config(
-                    text="Registration failed."
-                )
-            )
-
+            self.root.after(0, lambda: self.status_label.config(text="Registration failed."))
         else:
-
             self.people[name] = {
                 "relationship": relationship,
                 "embeddings": embeddings,
@@ -2211,41 +1630,24 @@ class DementiaAssistantPro:
                 "conversations": [],
                 "last_seen": None
             }
-
             self.save_database()
 
             self.root.after(
                 0,
-                lambda:
-                messagebox.showinfo(
+                lambda: messagebox.showinfo(
                     "Registration Successful",
                     f"{name} has been registered successfully."
                 )
             )
-
             self.root.after(
                 0,
-                lambda:
-                self.status_label.config(
+                lambda: self.status_label.config(
                     text=f"Registered: {name} ({relationship})"
                 )
             )
 
-        self.root.after(
-            0,
-            lambda:
-            self.register_btn.config(
-                state="normal"
-            )
-        )
-
-        self.root.after(
-            0,
-            lambda:
-            self.register_voice_btn.config(
-                state="normal"
-            )
-        )
+        self.root.after(0, lambda: self.register_btn.config(state="normal"))
+        self.root.after(0, lambda: self.register_voice_btn.config(state="normal"))
 
     # ========================================================
     # VOICE REGISTRATION
@@ -2253,13 +1655,8 @@ class DementiaAssistantPro:
 
     def voice_register_person(self):
 
-        self.register_voice_btn.config(
-            state="disabled"
-        )
-
-        self.register_btn.config(
-            state="disabled"
-        )
+        self.register_voice_btn.config(state="disabled")
+        self.register_btn.config(state="disabled")
 
         self.status_label.config(
             text="Listening... Say: Hello, I am Rahul, your son"
@@ -2273,45 +1670,27 @@ class DementiaAssistantPro:
     def run_voice_registration(self):
 
         try:
-
             person = register_from_voice()
 
             if person is None:
-
                 self.root.after(
                     0,
-                    lambda:
-                    self.status_label.config(
+                    lambda: self.status_label.config(
                         text="Could not understand registration."
                     )
                 )
-
                 return
 
             name = person["name"]
+            relationship = person["relationship"]
 
-            relationship = person[
-                "relationship"
-            ]
-
-            print(
-                "Voice registration:"
-            )
-
-            print(
-                "Name:",
-                name
-            )
-
-            print(
-                "Relationship:",
-                relationship
-            )
+            print("Voice registration:")
+            print("Name:", name)
+            print("Relationship:", relationship)
 
             self.root.after(
                 0,
-                lambda:
-                self.status_label.config(
+                lambda: self.status_label.config(
                     text=f"Voice recognized: {name} ({relationship})"
                 )
             )
@@ -2320,49 +1699,25 @@ class DementiaAssistantPro:
 
             self.root.after(
                 0,
-                lambda:
-                self.status_label.config(
+                lambda: self.status_label.config(
                     text=f"Look at the camera to register {name}..."
                 )
             )
 
-            self.capture_registration(
-                name,
-                relationship
-            )
+            self.capture_registration(name, relationship)
 
         except Exception as e:
-
-            print(
-                "Voice registration error:",
-                e
-            )
-
+            print("Voice registration error:", e)
             self.root.after(
                 0,
-                lambda err=e:
-                self.status_label.config(
+                lambda err=e: self.status_label.config(
                     text=f"Voice registration error: {err}"
                 )
             )
 
         finally:
-
-            self.root.after(
-                0,
-                lambda:
-                self.register_voice_btn.config(
-                    state="normal"
-                )
-            )
-
-            self.root.after(
-                0,
-                lambda:
-                self.register_btn.config(
-                    state="normal"
-                )
-            )
+            self.root.after(0, lambda: self.register_voice_btn.config(state="normal"))
+            self.root.after(0, lambda: self.register_btn.config(state="normal"))
 
     # ========================================================
     # CONVERSATION RECORDING
@@ -2371,11 +1726,8 @@ class DementiaAssistantPro:
     def toggle_conversation_recording(self):
 
         if not self.recording:
-
             self.start_conversation_recording()
-
         else:
-
             self.stop_conversation_recording()
 
     def start_conversation_recording(self):
@@ -2383,37 +1735,27 @@ class DementiaAssistantPro:
         target = self.current_person
 
         if target is None:
-
             target = self.prompt_for_person_name()
-
             if target is None:
                 return
 
         self.recording_target_person = target
-
-        self._set_conversation_text(
-            f"Recording conversation with {target}...\n\n"
-        )
+        self._set_conversation_text(f"Recording conversation with {target}...\n\n")
 
         self.speech_recorder = SpeechRecorder(
             on_partial_text=self.on_partial_transcript
         )
 
         try:
-
             self.speech_recorder.start()
-
         except Exception as e:
-
             messagebox.showerror(
                 "Microphone Error",
                 f"Could not start recording:\n{e}"
             )
-
             return
 
         self.recording = True
-
         self.record_btn.config(
             text="Stop & Save Conversation",
             bg=DANGER,
@@ -2425,26 +1767,21 @@ class DementiaAssistantPro:
     def prompt_for_person_name(self):
 
         if not self.people:
-
             messagebox.showwarning(
                 "No People Registered",
                 "Please register a person first."
             )
-
             return None
 
         name = simpledialog.askstring(
             "Who is this conversation with?",
-            "No one is currently recognized.\n"
-            "Enter the registered person's name:"
+            "No one is currently recognized.\nEnter the registered person's name:"
         )
 
         if name and name in self.people:
-
             return name
 
         if name:
-
             messagebox.showwarning(
                 "Unknown Person",
                 f"'{name}' is not a registered person."
@@ -2456,68 +1793,18 @@ class DementiaAssistantPro:
 
         self.root.after(
             0,
-            lambda:
-            self._append_conversation_text(
-                text + " "
-            )
+            lambda: self._append_conversation_text(text + " ")
         )
 
     def stop_conversation_recording(self):
 
         if not self.speech_recorder:
-
-            print(
-                "ERROR: No speech recorder exists."
-            )
-
             return
 
-        print(
-            "\n========================================"
-        )
-
-        print(
-            "STOPPING CONVERSATION RECORDING"
-        )
-
-        print(
-            "========================================"
-        )
-
         try:
-
-            transcript = (
-                self.speech_recorder.stop()
-            )
-
-            print(
-                "Speech recorder stopped."
-            )
-
-            print(
-                "Transcript received:"
-            )
-
-            print(
-                repr(transcript)
-            )
-
-            print(
-                "Transcript length:",
-                len(transcript)
-                if transcript
-                else 0
-            )
-
+            transcript = self.speech_recorder.stop()
         except Exception as e:
-
-            print(
-                "ERROR while stopping recorder:",
-                repr(e)
-            )
-
             self.recording = False
-
             self.record_btn.config(
                 text="Start Conversation",
                 state="normal",
@@ -2525,175 +1812,36 @@ class DementiaAssistantPro:
                 activebackground=ACCENT_DARK,
                 fg=WHITE
             )
-
-            messagebox.showerror(
-                "Recording Error",
-                f"Could not stop recording:\n\n{e}"
-            )
-
+            messagebox.showerror("Recording Error", f"Could not stop recording:\n\n{e}")
             return
 
         self.recording = False
-
         self.record_btn.config(
             text="Processing Conversation...",
             state="disabled"
         )
 
-        self._set_conversation_text(
-            "Generating AI summary...\n\n"
-            "Please wait..."
-        )
-
-        target = (
-            self.recording_target_person
-        )
-
-        print(
-            "Conversation target:",
-            target
-        )
-
-        print(
-            "Starting processing thread..."
-        )
+        self._set_conversation_text("Generating AI summary...\n\nPlease wait...")
+        target = self.recording_target_person
 
         threading.Thread(
             target=self._process_and_save_conversation,
-            args=(
-                target,
-                transcript
-            ),
+            args=(target, transcript),
             daemon=True
         ).start()
 
-    def _process_and_save_conversation(
-        self,
-        name,
-        transcript
-    ):
+    def _process_and_save_conversation(self, name, transcript):
 
         try:
+            if not transcript or not transcript.strip():
+                raise ValueError("The speech recorder returned an empty transcript.")
 
-            print(
-                "\n========================================"
-            )
+            summary = summarize_text(transcript, name=name)
 
-            print(
-                "CONVERSATION PROCESSING"
-            )
+            if not summary or not summary.strip():
+                raise ValueError("summarize_text() returned an empty summary.")
 
-            print(
-                "========================================"
-            )
-
-            print(
-                "Person:",
-                name
-            )
-
-            print(
-                "Transcript:",
-                repr(transcript)
-            )
-
-            print(
-                "Transcript length:",
-                len(transcript)
-                if transcript
-                else 0
-            )
-
-            # -----------------------------------------
-            # CHECK TRANSCRIPT
-            # -----------------------------------------
-
-            if (
-                not transcript
-                or
-                not transcript.strip()
-            ):
-
-                print(
-                    "ERROR: Transcript is empty!"
-                )
-
-                raise ValueError(
-                    "The speech recorder returned an empty transcript."
-                )
-
-            # -----------------------------------------
-            # GENERATE SUMMARY
-            # -----------------------------------------
-
-            print(
-                "\nSTEP 1 -> Calling summarize_text()..."
-            )
-
-            summary = summarize_text(
-                transcript,
-                name=name
-            )
-
-            print(
-                "STEP 2 -> Summary returned:"
-            )
-
-            print(
-                repr(summary)
-            )
-
-            if (
-                not summary
-                or
-                not summary.strip()
-            ):
-
-                raise ValueError(
-                    "summarize_text() returned an empty summary."
-                )
-
-            # -----------------------------------------
-            # SAVE FILES
-            # -----------------------------------------
-
-            print(
-                "\nSTEP 3 -> Saving conversation files..."
-            )
-
-            record = save_conversation_files(
-                name,
-                transcript,
-                summary
-            )
-
-            print(
-                "STEP 4 -> Conversation files saved."
-            )
-
-            print(
-                "Transcript file:"
-            )
-
-            print(
-                record["transcript_file"]
-            )
-
-            print(
-                "Summary file:"
-            )
-
-            print(
-                record["summary_file"]
-            )
-
-            # -----------------------------------------
-            # DATABASE
-            # -----------------------------------------
-
-            print(
-                "\nSTEP 5 -> Updating database..."
-            )
+            record = save_conversation_files(name, transcript, summary)
 
             self.people.setdefault(
                 name,
@@ -2704,88 +1852,26 @@ class DementiaAssistantPro:
                     "last_seen": None
                 }
             )
-
-            self.people[name].setdefault(
-                "conversations",
-                []
-            )
-
-            self.people[name][
-                "conversations"
-            ].append(
-                record
-            )
-
+            self.people[name].setdefault("conversations", [])
+            self.people[name]["conversations"].append(record)
             self.save_database()
 
-            print(
-                "STEP 6 -> Database saved."
-            )
-
-            print(
-                "\n========================================"
-            )
-
-            print(
-                "CONVERSATION PROCESSING COMPLETE"
-            )
-
-            print(
-                "========================================\n"
-            )
-
-            # -----------------------------------------
-            # UPDATE UI
-            # -----------------------------------------
-
-            self.root.after(
-                0,
-                lambda n=name, r=record:
-                self._show_summary(
-                    n,
-                    r
-                )
-            )
+            self.root.after(0, lambda n=name, r=record: self._show_summary(n, r))
 
         except Exception as e:
-
-            print(
-                "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-            )
-
-            print(
-                "CONVERSATION PROCESSING ERROR"
-            )
-
-            print(
-                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-            )
-
-            print(
-                repr(e)
-            )
-
-            print(
-                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-            )
-
             error_message = str(e)
-
             self.root.after(
                 0,
-                lambda err=error_message:
-                messagebox.showerror(
+                lambda err=error_message: messagebox.showerror(
                     "Conversation Error",
                     f"Could not process conversation:\n\n{err}"
                 )
             )
 
         finally:
-
             self.root.after(
                 0,
-                lambda:
-                self.record_btn.config(
+                lambda: self.record_btn.config(
                     text="Start Conversation",
                     state="normal",
                     bg=ACCENT,
@@ -2794,43 +1880,25 @@ class DementiaAssistantPro:
                 )
             )
 
-    def _show_summary(
-        self,
-        name,
-        record
-    ):
+    def _show_summary(self, name, record):
 
         self._set_conversation_text(
             f"Conversation with {name}\n"
             f"{record['display_date']}\n\n"
             f"{record['summary']}"
         )
-
-        self.refresh_last_conversation_button(
-            name
-        )
+        self.refresh_last_conversation_button(name)
 
     # ========================================================
     # CONVERSATION RETRIEVAL
     # ========================================================
 
-    def refresh_last_conversation_button(
-        self,
-        name
-    ):
+    def refresh_last_conversation_button(self, name):
 
-        conversations = self.people.get(
-            name,
-            {}
-        ).get(
-            "conversations",
-            []
-        )
+        conversations = self.people.get(name, {}).get("conversations", [])
 
         if conversations:
-
             last = conversations[-1]
-
             self.last_conv_label.config(
                 text=(
                     f"Last conversation with {name}\n"
@@ -2838,50 +1906,29 @@ class DementiaAssistantPro:
                 ),
                 fg=TEXT
             )
-
             self.view_conv_btn.config(
                 state="normal",
                 cursor="hand2",
-                command=lambda:
-                self.load_last_conversation(
-                    name
-                )
+                command=lambda: self.load_last_conversation(name)
             )
-
         else:
-
             self.last_conv_label.config(
-                text=(
-                    f"No past conversations with "
-                    f"{name} yet."
-                ),
+                text=f"No past conversations with {name} yet.",
                 fg=SECONDARY
             )
-
             self.view_conv_btn.config(
                 state="disabled",
                 cursor="arrow",
                 command=lambda: None
             )
 
-    def load_last_conversation(
-        self,
-        name
-    ):
+    def load_last_conversation(self, name):
 
-        conversations = self.people.get(
-            name,
-            {}
-        ).get(
-            "conversations",
-            []
-        )
-
+        conversations = self.people.get(name, {}).get("conversations", [])
         if not conversations:
             return
 
         last = conversations[-1]
-
         self._set_conversation_text(
             f"Last conversation with {name}\n"
             f"{last['display_date']}\n\n"
@@ -2894,22 +1941,12 @@ class DementiaAssistantPro:
 
     def on_closing(self):
 
-        print(
-            "Closing application..."
-        )
-
+        print("Closing application...")
         self.ai_running = False
 
-        if (
-            self.recording
-            and
-            self.speech_recorder
-        ):
-
+        if self.recording and self.speech_recorder:
             try:
-
                 self.speech_recorder.stop()
-
             except Exception:
                 pass
 
@@ -2928,9 +1965,5 @@ class DementiaAssistantPro:
 if __name__ == "__main__":
 
     root = tk.Tk()
-
-    app = DementiaAssistantPro(
-        root
-    )
-
+    app = DementiaAssistantPro(root)
     root.mainloop()

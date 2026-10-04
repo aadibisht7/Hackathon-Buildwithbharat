@@ -1,4 +1,4 @@
-# ForgetMeNot — Dementia Assistant Pro
+# ForgetMeNot — Dementia Assistant
 
 A desktop app that uses a webcam to recognize registered family members / caregivers in real time, shows "last met" info, and can record, transcribe, and summarize conversations for later recall.
 

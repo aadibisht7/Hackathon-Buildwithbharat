@@ -308,5 +308,3 @@ For larger changes, open an issue before submitting a pull request.
 ## License
 
 This project is currently intended for educational, experimental, and hackathon development.
-
-Add an app
